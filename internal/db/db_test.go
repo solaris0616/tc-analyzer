@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -19,7 +20,7 @@ func TestDBOperations(t *testing.T) {
 	defer database.Close()
 
 	// Test CreateSession
-	sessionID, err := database.CreateSession("movie_100", 10, "Test Session")
+	sessionID, err := database.CreateSessionWithBroadcaster("movie_100", 10, "Test Session", Broadcaster{ID: "user_1", ScreenID: "streamer", Name: "Streamer"})
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
@@ -115,12 +116,121 @@ func TestDBOperations(t *testing.T) {
 	}
 
 	// Test AnalysisData
-	analysis, err := database.GetAnalysisData()
+	analysis, err := database.GetAnalysisData("user_1")
 	if err != nil {
 		t.Fatalf("GetAnalysisData failed: %v", err)
 	}
 	if len(analysis) == 0 {
 		t.Errorf("expected analysis data, got empty")
+	}
+}
+
+func TestBroadcasterFiltering(t *testing.T) {
+	database, err := New(filepath.Join(t.TempDir(), "broadcasters.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	firstID, err := database.CreateSessionWithBroadcaster("movie_a", 10, "", Broadcaster{ID: "owner_a", ScreenID: "alice", Name: "Alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := database.CreateSessionWithBroadcaster("movie_b", 10, "", Broadcaster{ID: "owner_b", ScreenID: "bob", Name: "Bob"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.AddSnapshot(firstID, &api.MovieSnapshot{IsLive: true, CurrentViewCount: 100}, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.AddSnapshot(secondID, &api.MovieSnapshot{IsLive: true, CurrentViewCount: 1000}, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	broadcasters, err := database.ListBroadcasters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(broadcasters) != 2 {
+		t.Fatalf("expected two broadcasters, got %+v", broadcasters)
+	}
+
+	movies, err := database.ListMoviesByBroadcaster("owner_a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(movies) != 1 || movies[0].MovieID != "movie_a" {
+		t.Fatalf("another broadcaster leaked into movie list: %+v", movies)
+	}
+
+	analysis, err := database.GetAnalysisData("owner_a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(analysis) != 1 || analysis[0].AvgViewers != 100 || analysis[0].DataPoints != 1 {
+		t.Fatalf("another broadcaster leaked into analysis: %+v", analysis)
+	}
+}
+
+func TestBackfillBroadcasterForMovie(t *testing.T) {
+	database, err := New(filepath.Join(t.TempDir(), "backfill.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	if _, err := database.CreateSession("movie_old", 10, ""); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := database.ListUnattributedMovieIDs()
+	if err != nil || len(ids) != 1 || ids[0] != "movie_old" {
+		t.Fatalf("unexpected unattributed IDs: %v, %v", ids, err)
+	}
+	updated, err := database.BackfillBroadcasterForMovie("movie_old", Broadcaster{ID: "owner", ScreenID: "screen", Name: "Name"})
+	if err != nil || updated != 1 {
+		t.Fatalf("backfill failed: updated=%d err=%v", updated, err)
+	}
+	updated, err = database.BackfillBroadcasterForMovie("movie_old", Broadcaster{ID: "owner", ScreenID: "screen", Name: "Name"})
+	if err != nil || updated != 0 {
+		t.Fatalf("backfill was not idempotent: updated=%d err=%v", updated, err)
+	}
+}
+
+func TestNewMigratesLegacySessionsTable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`
+CREATE TABLE sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    movie_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    label TEXT,
+    interval_sec INTEGER NOT NULL DEFAULT 10
+);
+INSERT INTO sessions (movie_id, started_at, interval_sec)
+VALUES ('legacy_movie', '2026-08-19T00:00:00Z', 10);
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("legacy migration failed: %v", err)
+	}
+	defer database.Close()
+	sessions, err := database.ListSessions("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].MovieID != "legacy_movie" || sessions[0].BroadcasterID != "" {
+		t.Fatalf("legacy data was not preserved: %+v", sessions)
 	}
 }
 

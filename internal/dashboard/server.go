@@ -51,6 +51,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	mux.Handle("GET /", http.FileServer(http.FS(staticFS)))
+	mux.HandleFunc("GET /api/broadcasters", s.handleGetBroadcasters)
 	mux.HandleFunc("GET /api/movies", s.handleGetMovies)
 	mux.HandleFunc("GET /api/movies/{movie_id}", s.handleGetMovieDetail)
 	mux.HandleFunc("GET /api/movies/{movie_id}/commenters", s.handleGetCommenters)
@@ -76,7 +77,21 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func (s *Server) handleGetMovies(w http.ResponseWriter, r *http.Request) {
-	movies, err := s.db.ListMovies()
+	broadcasterID := r.URL.Query().Get("broadcaster_id")
+	if broadcasterID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "broadcaster_id parameter required"})
+		return
+	}
+	exists, err := s.db.BroadcasterExists(broadcasterID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if !exists {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Broadcaster not found"})
+		return
+	}
+	movies, err := s.db.ListMoviesByBroadcaster(broadcasterID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": %q}`, err.Error()), http.StatusInternalServerError)
 		return
@@ -85,6 +100,18 @@ func (s *Server) handleGetMovies(w http.ResponseWriter, r *http.Request) {
 		movies = []*db.MovieListRow{}
 	}
 	writeJSON(w, http.StatusOK, movies)
+}
+
+func (s *Server) handleGetBroadcasters(w http.ResponseWriter, r *http.Request) {
+	broadcasters, err := s.db.ListBroadcasters()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if broadcasters == nil {
+		broadcasters = []*db.BroadcasterListRow{}
+	}
+	writeJSON(w, http.StatusOK, broadcasters)
 }
 
 func (s *Server) handleGetMovieDetail(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +199,21 @@ func (s *Server) handleGetCommenters(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetAnalysis(w http.ResponseWriter, r *http.Request) {
-	data, err := s.db.GetAnalysisData()
+	broadcasterID := r.URL.Query().Get("broadcaster_id")
+	if broadcasterID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "broadcaster_id parameter required"})
+		return
+	}
+	exists, err := s.db.BroadcasterExists(broadcasterID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if !exists {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Broadcaster not found"})
+		return
+	}
+	data, err := s.db.GetAnalysisData(broadcasterID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": %q}`, err.Error()), http.StatusInternalServerError)
 		return

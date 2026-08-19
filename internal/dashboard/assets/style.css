@@ -468,6 +468,27 @@ body {
     flex-shrink: 0;
 }
 
+.broadcaster-control {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: 38px;
+    padding: 0 var(--space-3);
+    background: rgba(18, 27, 44, 0.6);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+}
+
+.broadcaster-control label {
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    white-space: nowrap;
+}
+
+.broadcaster-control select {
+    max-width: 260px;
+}
+
 /* Auto Refresh Component */
 .auto-refresh-control {
     display: flex;
@@ -863,6 +884,12 @@ body {
     }
 
     .header-actions {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+
+    .broadcaster-control,
+    .auto-refresh-control {
         width: 100%;
     }
 

@@ -72,6 +72,9 @@ func TestAPIClient(t *testing.T) {
 	if movie.MovieID != "189037369" || movie.Title != "Test Title" || !movie.IsLive {
 		t.Errorf("unexpected movie info: %+v", movie)
 	}
+	if movie.BroadcasterID != "12345" || movie.BroadcasterScreenID != "twitcasting_jp" {
+		t.Errorf("unexpected broadcaster info: %+v", movie)
+	}
 
 	// Test GetCurrentLive on offline user
 	live, err := client.GetCurrentLive(ctx, "offline_user")

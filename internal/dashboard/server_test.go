@@ -22,7 +22,7 @@ func TestDashboardServer(t *testing.T) {
 	defer database.Close()
 
 	// Insert test data
-	sessionID, err := database.CreateSession("movie_test", 10, "Dashboard Test")
+	sessionID, err := database.CreateSessionWithBroadcaster("movie_test", 10, "Dashboard Test", db.Broadcaster{ID: "user_100", ScreenID: "tester", Name: "Tester"})
 	if err != nil {
 		t.Fatalf("failed to create session: %v", err)
 	}
@@ -52,12 +52,27 @@ func TestDashboardServer(t *testing.T) {
 
 	// Test endpoints with httptest against handlers directly
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/broadcasters", server.handleGetBroadcasters)
 	mux.HandleFunc("GET /api/movies", server.handleGetMovies)
 	mux.HandleFunc("GET /api/movies/{movie_id}", server.handleGetMovieDetail)
 	mux.HandleFunc("GET /api/analysis", server.handleGetAnalysis)
 
+	reqBroadcasters := httptest.NewRequest("GET", "/api/broadcasters", nil)
+	recBroadcasters := httptest.NewRecorder()
+	mux.ServeHTTP(recBroadcasters, reqBroadcasters)
+	if recBroadcasters.Code != http.StatusOK {
+		t.Fatalf("expected status 200 for /api/broadcasters, got %d", recBroadcasters.Code)
+	}
+	var broadcasters []*db.BroadcasterListRow
+	if err := json.Unmarshal(recBroadcasters.Body.Bytes(), &broadcasters); err != nil {
+		t.Fatalf("failed to unmarshal broadcasters: %v", err)
+	}
+	if len(broadcasters) != 1 || broadcasters[0].ID != "user_100" {
+		t.Fatalf("unexpected broadcasters output: %+v", broadcasters)
+	}
+
 	// Test GET /api/movies
-	req := httptest.NewRequest("GET", "/api/movies", nil)
+	req := httptest.NewRequest("GET", "/api/movies?broadcaster_id=user_100", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -71,6 +86,26 @@ func TestDashboardServer(t *testing.T) {
 	}
 	if len(movies) != 1 || movies[0].MovieID != "movie_test" {
 		t.Errorf("unexpected movies output: %+v", movies)
+	}
+	reqMoviesMissingFilter := httptest.NewRequest("GET", "/api/movies", nil)
+	recMoviesMissingFilter := httptest.NewRecorder()
+	mux.ServeHTTP(recMoviesMissingFilter, reqMoviesMissingFilter)
+	if recMoviesMissingFilter.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 for movies without broadcaster filter, got %d", recMoviesMissingFilter.Code)
+	}
+
+	reqAnalysis := httptest.NewRequest("GET", "/api/analysis?broadcaster_id=user_100", nil)
+	recAnalysis := httptest.NewRecorder()
+	mux.ServeHTTP(recAnalysis, reqAnalysis)
+	if recAnalysis.Code != http.StatusOK {
+		t.Fatalf("expected status 200 for filtered analysis, got %d", recAnalysis.Code)
+	}
+
+	reqMissingFilter := httptest.NewRequest("GET", "/api/analysis", nil)
+	recMissingFilter := httptest.NewRecorder()
+	mux.ServeHTTP(recMissingFilter, reqMissingFilter)
+	if recMissingFilter.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 without broadcaster filter, got %d", recMissingFilter.Code)
 	}
 
 	// Test GET /api/movies/movie_test

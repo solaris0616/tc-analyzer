@@ -107,6 +107,13 @@ func TestMonitorMovie(t *testing.T) {
 	if len(snaps) == 0 {
 		t.Fatalf("expected snapshots in database")
 	}
+	session, err := database.GetSession(sessionID)
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	if session.BroadcasterID != "100" || session.BroadcasterScreenID != "test_user" || session.BroadcasterName != "Test User" {
+		t.Fatalf("broadcaster metadata was not saved: %+v", session)
+	}
 }
 
 func TestMonitorMovieCancelsCommentPollingOnNaturalEnd(t *testing.T) {

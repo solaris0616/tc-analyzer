@@ -1,8 +1,10 @@
+let currentBroadcasterID = null;
 let currentMovieID = null;
 let viewerChart = null;
 let analysisChart = null;
 let autoRefreshTimer = null;
 let autoRefreshInterval = 10; // seconds (0 = off)
+let refreshGeneration = 0;
 
 // Design system chart global defaults
 Chart.defaults.font.family = "'Inter', system-ui, -apple-system, sans-serif";
@@ -115,16 +117,97 @@ function updateLastUpdatedDisplay() {
 }
 
 async function refreshAllData(isSilent = false) {
+    const generation = ++refreshGeneration;
     try {
-        await Promise.all([
-            loadMovieList(isSilent),
-            currentMovieID ? loadMovieDetail(currentMovieID, isSilent) : Promise.resolve(),
-            loadAnalysisData(isSilent)
-        ]);
+        await loadBroadcasters(generation);
+        if (generation !== refreshGeneration || !currentBroadcasterID) return;
+
+        const movies = await loadMovieList(isSilent, generation);
+        if (generation !== refreshGeneration) return;
+
+        if (!movies || movies.length === 0) {
+            currentMovieID = null;
+            clearMovieDetail();
+            await loadAnalysisData(isSilent, generation);
+        } else {
+            if (!currentMovieID || !movies.some(m => m.movie_id === currentMovieID)) {
+                currentMovieID = movies[0].movie_id;
+            }
+            await Promise.all([
+                loadMovieDetail(currentMovieID, isSilent, generation),
+                loadAnalysisData(isSilent, generation)
+            ]);
+        }
+        if (generation !== refreshGeneration) return;
         updateLastUpdatedDisplay();
     } catch (err) {
         console.error('Error during data refresh:', err);
     }
+}
+
+async function loadBroadcasters(generation) {
+    const res = await fetch('/api/broadcasters');
+    if (!res.ok) throw new Error('Failed to fetch broadcasters');
+    const broadcasters = await res.json();
+    if (generation !== refreshGeneration) return;
+
+    const select = document.getElementById('broadcaster-select');
+    if (!select) return;
+
+    const savedID = localStorage.getItem('tc_broadcaster_id');
+    const availableIDs = new Set(broadcasters.map(b => b.id));
+    if (!currentBroadcasterID || !availableIDs.has(currentBroadcasterID)) {
+        currentBroadcasterID = availableIDs.has(savedID) ? savedID : (broadcasters[0]?.id || null);
+        currentMovieID = null;
+    }
+
+    select.innerHTML = '';
+    if (broadcasters.length === 0) {
+        select.innerHTML = '<option value="">配信者データがありません</option>';
+        select.disabled = true;
+        clearMovieDetail();
+        const container = document.getElementById('movie-list');
+        if (container) container.innerHTML = '<div class="loading-spinner-container"><span>新規収集またはバックフィルを実行してください</span></div>';
+        return;
+    }
+
+    broadcasters.forEach(b => {
+        const option = document.createElement('option');
+        option.value = b.id;
+        const displayName = b.name || b.screen_id || b.id;
+        const screenID = b.screen_id ? ` (@${b.screen_id})` : '';
+        option.textContent = `${displayName}${screenID} — ${b.movie_count}配信`;
+        select.appendChild(option);
+    });
+    select.value = currentBroadcasterID;
+    select.disabled = false;
+
+    if (!select.hasAttribute('data-bound')) {
+        select.setAttribute('data-bound', 'true');
+        select.addEventListener('change', () => {
+            currentBroadcasterID = select.value || null;
+            currentMovieID = null;
+            _allCommenters = [];
+            if (currentBroadcasterID) localStorage.setItem('tc_broadcaster_id', currentBroadcasterID);
+            refreshAllData(false);
+        });
+    }
+}
+
+function clearMovieDetail() {
+    ['stat-max-viewers', 'stat-avg-viewers', 'stat-comments', 'stat-records', 'stat-commenter-count']
+        .forEach(id => { const el = document.getElementById(id); if (el) el.textContent = '-'; });
+    const title = document.getElementById('selected-title');
+    const subtitle = document.getElementById('selected-subtitle');
+    if (title) title.textContent = 'ダッシュボード';
+    if (subtitle) {
+        subtitle.textContent = currentBroadcasterID ? '配信データがありません' : '配信者を選択してください';
+        subtitle.className = 'status-badge badge-neutral';
+    }
+    renderViewerChart([], false);
+    renderAnalysisChart([]);
+    const tbody = document.getElementById('commenters-tbody');
+    if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="empty-row">配信を選択してください</td></tr>';
 }
 
 function formatShortDateTime(isoStr) {
@@ -147,11 +230,17 @@ function formatFullDateTime(isoStr) {
            String(d.getSeconds()).padStart(2, '0');
 }
 
-async function loadMovieList(isSilent = false) {
+async function loadMovieList(isSilent = false, generation = refreshGeneration) {
     try {
-        const res = await fetch('/api/movies');
+        if (!currentBroadcasterID) return [];
+        const res = await fetch(`/api/movies?broadcaster_id=${encodeURIComponent(currentBroadcasterID)}`);
         if (!res.ok) throw new Error('Failed to fetch movies');
         const movies = await res.json();
+        if (generation !== refreshGeneration) return [];
+
+        if (movies.length > 0 && (!currentMovieID || !movies.some(m => m.movie_id === currentMovieID))) {
+            currentMovieID = movies[0].movie_id;
+        }
 
         const container = document.getElementById('movie-list');
         const countBadge = document.getElementById('session-count');
@@ -162,13 +251,7 @@ async function loadMovieList(isSilent = false) {
 
         if (!movies || movies.length === 0) {
             container.innerHTML = '<div class="loading-spinner-container"><span>対象のデータがありません</span></div>';
-            return;
-        }
-
-        // If no movie is currently selected, pick the first one
-        if (!currentMovieID && movies.length > 0) {
-            currentMovieID = movies[0].movie_id;
-            loadMovieDetail(currentMovieID, isSilent);
+            return [];
         }
 
         // Preserve scroll position if re-rendering silently
@@ -213,17 +296,20 @@ async function loadMovieList(isSilent = false) {
         if (isSilent) {
             container.scrollTop = prevScrollTop;
         }
+        return movies;
     } catch (err) {
         console.error('Error loading movie list:', err);
+        return [];
     }
 }
 
-async function loadMovieDetail(movieID, isSilent = false) {
+async function loadMovieDetail(movieID, isSilent = false, generation = refreshGeneration) {
     currentMovieID = movieID;
     try {
         const res = await fetch(`/api/movies/${movieID}`);
         if (!res.ok) throw new Error('Failed to fetch movie detail');
         const data = await res.json();
+        if (generation !== refreshGeneration || movieID !== currentMovieID) return;
 
         const titleEl = document.getElementById('selected-title');
         const subtitleEl = document.getElementById('selected-subtitle');
@@ -398,11 +484,13 @@ function renderViewerChart(snapshots, isSilent = false) {
     });
 }
 
-async function loadAnalysisData(isSilent = false) {
+async function loadAnalysisData(isSilent = false, generation = refreshGeneration) {
     try {
-        const res = await fetch('/api/analysis');
+        if (!currentBroadcasterID) return;
+        const res = await fetch(`/api/analysis?broadcaster_id=${encodeURIComponent(currentBroadcasterID)}`);
         if (!res.ok) throw new Error('Failed to fetch analysis data');
         const rows = await res.json();
+        if (generation !== refreshGeneration) return;
 
         renderAnalysisChart(rows || [], isSilent);
     } catch (err) {

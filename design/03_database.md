@@ -15,7 +15,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     movie_id     TEXT    NOT NULL,
     started_at   TEXT    NOT NULL,   -- ISO8601 UTC 例: 2024-01-15T10:30:00+00:00
     label        TEXT,               -- ユーザーが付けたラベル (NULL 可)
-    interval_sec INTEGER NOT NULL DEFAULT 10
+    interval_sec INTEGER NOT NULL DEFAULT 10,
+    broadcaster_id        TEXT,
+    broadcaster_screen_id TEXT,
+    broadcaster_name      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -174,8 +177,11 @@ func (d *DB) GetMovieSummary(movieID string) (*SessionSummary, error)
 ```go
 // GetAnalysisData は曜日・時間帯別の集計データを返す（JST 換算）
 // AnalysisRow は {DayOfWeek, HourOfDay, MinuteOfHour, AvgViewers, MaxViewers, DataPoints} を持つ
-func (d *DB) GetAnalysisData() ([]*AnalysisRow, error)
+func (d *DB) GetAnalysisData(broadcasterID string) ([]*AnalysisRow, error)
 ```
+
+配信者別ダッシュボードの追加仕様、既存DBの移行、およびバックフィルについては
+[設計書07](07_broadcaster_dashboard.md)を参照する。
 
 ---
 

@@ -14,9 +14,12 @@ Go 版では、外部の重量フレームワークを使用せず、標準ラ�
 | パス | メソッド | 説明 |
 |---|---|---|
 | `/` | `GET` | 埋め込みフロントエンド HTML の提供 |
-| `/api/movies` | `GET` | 監視された配信 (Movie ID 単位) の一覧取得 |
+| `/api/broadcasters` | `GET` | 保存済みデータの配信者一覧取得 |
+| `/api/movies?broadcaster_id={id}` | `GET` | 選択配信者の監視された配信一覧取得 |
 | `/api/movies/{movie_id}` | `GET` | 指定された Movie ID の詳細・集計サマリー・スナップショット群の取得 |
-| `/api/analysis` | `GET` | 全データに基づく曜日・時間帯別集計データ (JST) の取得 |
+| `/api/analysis?broadcaster_id={id}` | `GET` | 選択配信者に基づく曜日・時間帯別集計データ (JST) の取得 |
+
+配信者選択、APIの必須パラメータ、画面状態遷移の詳細は[設計書07](07_broadcaster_dashboard.md)を参照する。
 
 ---
 

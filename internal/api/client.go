@@ -27,6 +27,7 @@ type MovieSnapshot struct {
 	TotalViewCount      int    `json:"total_view_count"`
 	Duration            int    `json:"duration"`
 	CreatedAt           int64  `json:"created"`
+	BroadcasterID       string `json:"broadcaster_id"`
 	BroadcasterScreenID string `json:"broadcaster_screen_id"`
 	BroadcasterName     string `json:"broadcaster_name"`
 }
@@ -120,9 +121,9 @@ func NewClient(clientID, clientSecret string, timeout time.Duration) *Client {
 
 	auth := base64.StdEncoding.EncodeToString([]byte(clientID + ":" + clientSecret))
 	headers := map[string]string{
-		"Authorization":  "Basic " + auth,
-		"X-Api-Version":  "2.0",
-		"Accept":         "application/json",
+		"Authorization": "Basic " + auth,
+		"X-Api-Version": "2.0",
+		"Accept":        "application/json",
 	}
 
 	return &Client{
@@ -276,6 +277,7 @@ func parseMovieSnapshot(data *movieResponseJSON) *MovieSnapshot {
 		TotalViewCount:      data.Movie.TotalViewCount,
 		Duration:            data.Movie.Duration,
 		CreatedAt:           data.Movie.Created,
+		BroadcasterID:       data.Broadcaster.ID,
 		BroadcasterScreenID: data.Broadcaster.ScreenID,
 		BroadcasterName:     data.Broadcaster.Name,
 	}

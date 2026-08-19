@@ -32,7 +32,8 @@ type MonitorOptions struct {
 // MonitorMovie monitors a user's stream, polling data periodically.
 func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, userID string, opts MonitorOptions) (int64, error) {
 	// 0. Verify user exists
-	if _, err := client.GetUser(ctx, userID); err != nil {
+	user, err := client.GetUser(ctx, userID)
+	if err != nil {
 		var apiErr *api.APIError
 		if errors.As(err, &apiErr) && apiErr.HTTPStatus == 404 {
 			return 0, fmt.Errorf("ユーザー @%s は存在しません", userID)
@@ -62,16 +63,34 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
 			return 0, fmt.Errorf("ユーザー @%s は現在オフラインです。監視を開始するには -w/--wait フラグを指定してください", userID)
 		}
 		// Wait for live
-		id, err := waitForLive(ctx, client, userID, opts.WaitInterval, opts.WaitTimeout, opts.Writer)
+		liveSnapshot, err := waitForLive(ctx, client, userID, opts.WaitInterval, opts.WaitTimeout, opts.Writer)
 		if err != nil {
 			return 0, err
 		}
-		movieID = id
+		snapshot = liveSnapshot
+		movieID = snapshot.MovieID
 	}
 
 	// 2. Create database session
 	intervalSec := int(opts.Interval.Seconds())
-	sessionID, err := database.CreateSession(movieID, intervalSec, opts.Label)
+	broadcaster := db.Broadcaster{
+		ID:       snapshot.BroadcasterID,
+		ScreenID: snapshot.BroadcasterScreenID,
+		Name:     snapshot.BroadcasterName,
+	}
+	if broadcaster.ID == "" {
+		broadcaster.ID = user.ID
+	}
+	if broadcaster.ScreenID == "" {
+		broadcaster.ScreenID = user.ScreenID
+	}
+	if broadcaster.Name == "" {
+		broadcaster.Name = user.Name
+	}
+	if broadcaster.ID == "" {
+		return 0, fmt.Errorf("配信者IDを取得できませんでした")
+	}
+	sessionID, err := database.CreateSessionWithBroadcaster(movieID, intervalSec, opts.Label, broadcaster)
 	if err != nil {
 		return 0, fmt.Errorf("セッションの作成に失敗しました: %w", err)
 	}
@@ -150,6 +169,10 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
 			log.Printf("⚠ API エラー (poll #%d): %v\n", pollCount, err)
 			return true
 		}
+		if snap.BroadcasterID != "" && snap.BroadcasterID != broadcaster.ID {
+			log.Printf("⚠ 配信者IDが変化したためスナップショットを保存しません (expected=%s, actual=%s)\n", broadcaster.ID, snap.BroadcasterID)
+			return true
+		}
 
 		commentDelta := 0
 		if prevCommentCount != nil {
@@ -208,7 +231,7 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
 	}
 }
 
-func waitForLive(ctx context.Context, client *api.Client, userID string, pollInterval, timeout time.Duration, out io.Writer) (string, error) {
+func waitForLive(ctx context.Context, client *api.Client, userID string, pollInterval, timeout time.Duration, out io.Writer) (*api.MovieSnapshot, error) {
 	startTime := time.Now()
 	checkCount := 0
 
@@ -230,39 +253,39 @@ func waitForLive(ctx context.Context, client *api.Client, userID string, pollInt
 		outWriter = liveWriter
 	}
 
-	runCheck := func() (string, bool, error) {
+	runCheck := func() (*api.MovieSnapshot, bool, error) {
 		checkCount++
 
 		snapshot, err := client.GetCurrentLive(ctx, userID)
 		if err != nil {
 			log.Printf("⚠ API エラー (確認 #%d): %v\n", checkCount, err)
-			return "", false, nil
+			return nil, false, nil
 		}
 
 		if snapshot != nil && snapshot.IsLive {
-			return snapshot.MovieID, true, nil
+			return snapshot, true, nil
 		}
 
 		elapsedSec := int(time.Since(startTime).Seconds())
 		updateWaitPanel(outWriter, userID, checkCount, elapsedSec, timeout, pollInterval)
 
-		return "", false, nil
+		return nil, false, nil
 	}
 
-	if movieID, found, err := runCheck(); found || err != nil {
-		return movieID, err
+	if snapshot, found, err := runCheck(); found || err != nil {
+		return snapshot, err
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return "", fmt.Errorf("ユーザー @%s の配信開始待機がタイムアウトしました", userID)
+				return nil, fmt.Errorf("ユーザー @%s の配信開始待機がタイムアウトしました", userID)
 			}
-			return "", ctx.Err()
+			return nil, ctx.Err()
 		case <-ticker.C:
-			if movieID, found, err := runCheck(); found || err != nil {
-				return movieID, err
+			if snapshot, found, err := runCheck(); found || err != nil {
+				return snapshot, err
 			}
 		}
 	}

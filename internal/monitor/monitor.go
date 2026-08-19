@@ -17,14 +17,14 @@ import (
 
 // MonitorOptions defines parameters for monitoring a user's stream.
 type MonitorOptions struct {
-	Interval        time.Duration
-	Duration        time.Duration
-	Label           string
-	WaitOnConfig    bool
-	WaitInterval    time.Duration
-	WaitTimeout     time.Duration
-	Writer          io.Writer // Custom output writer (optional, defaults to uilive)
-	OnSnapshot      func(snap *api.MovieSnapshot, sessionID int64)
+	Interval     time.Duration
+	Duration     time.Duration
+	Label        string
+	WaitOnConfig bool
+	WaitInterval time.Duration
+	WaitTimeout  time.Duration
+	Writer       io.Writer // Custom output writer (optional, defaults to uilive)
+	OnSnapshot   func(snap *api.MovieSnapshot, sessionID int64)
 	// CommentInterval is the polling interval for comment collection (default: 15s).
 	CommentInterval time.Duration
 }

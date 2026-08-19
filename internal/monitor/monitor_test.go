@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -109,9 +110,8 @@ func TestMonitorMovie(t *testing.T) {
 }
 
 func TestMonitorMovieCancelsCommentPollingOnNaturalEnd(t *testing.T) {
-	commentStarted := make(chan struct{})
-	commentCanceled := make(chan struct{})
 	moviePolls := 0
+	var commentPolls atomic.Int32
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/users/test_user", func(w http.ResponseWriter, r *http.Request) {
@@ -129,9 +129,9 @@ func TestMonitorMovieCancelsCommentPollingOnNaturalEnd(t *testing.T) {
 		fmt.Fprintf(w, `{"movie":{"id":"movie_123","title":"Live","is_live":%t},"broadcaster":{"screen_id":"test_user","name":"Test User"}}`, isLive)
 	})
 	mux.HandleFunc("/movies/movie_123/comments", func(w http.ResponseWriter, r *http.Request) {
-		close(commentStarted)
-		<-r.Context().Done()
-		close(commentCanceled)
+		commentPolls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"movie_id":"movie_123","all_count":0,"comments":[]}`))
 	})
 
 	server := httptest.NewServer(mux)
@@ -148,7 +148,6 @@ func TestMonitorMovieCancelsCommentPollingOnNaturalEnd(t *testing.T) {
 	var buf bytes.Buffer
 	_, err = MonitorMovie(context.Background(), client, database, "test_user", MonitorOptions{
 		Interval:        50 * time.Millisecond,
-		Duration:        time.Second,
 		CommentInterval: 5 * time.Millisecond,
 		Writer:          &buf,
 	})
@@ -156,14 +155,12 @@ func TestMonitorMovieCancelsCommentPollingOnNaturalEnd(t *testing.T) {
 		t.Fatalf("MonitorMovie failed: %v", err)
 	}
 
-	select {
-	case <-commentStarted:
-	default:
+	pollsAtReturn := commentPolls.Load()
+	if pollsAtReturn == 0 {
 		t.Fatal("comment polling did not start")
 	}
-	select {
-	case <-commentCanceled:
-	default:
-		t.Fatal("MonitorMovie returned before comment polling stopped")
+	time.Sleep(30 * time.Millisecond)
+	if got := commentPolls.Load(); got != pollsAtReturn {
+		t.Fatalf("comment polling continued after MonitorMovie returned: before=%d after=%d", pollsAtReturn, got)
 	}
 }

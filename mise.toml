@@ -1,0 +1,33 @@
+min_version = "2026.8.2"
+
+[tools]
+go = "1.26.6"
+
+[tasks.setup]
+description = "Go モジュールの依存関係をダウンロード"
+run = "go mod download"
+
+[tasks.fmt]
+description = "Go ソースコードをフォーマット"
+run = "go fmt ./..."
+
+[tasks.test]
+description = "すべての Go テストを実行"
+run = "go test ./..."
+
+[tasks.vet]
+description = "go vet で静的解析を実行"
+run = "go vet ./..."
+
+[tasks.check]
+description = "テストと静的解析を実行"
+depends = ["test", "vet"]
+
+[tasks.build]
+description = "tc-analyzer をビルド"
+run = "go build ./cmd/tc-analyzer"
+
+[tasks.tc]
+description = "tc-analyzer CLI をソースから実行"
+run = "go run ./cmd/tc-analyzer"
+raw_args = true

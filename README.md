@@ -14,17 +14,49 @@ TwitCasting.tv の特定配信を定期ポーリングし、同時視聴者数�
 
 ## 必要要件
 
-- Go 1.26.5 以上
+- [mise](https://mise.jdx.dev/)
 
-## インストール・ビルド
+Go は `mise.toml` でバージョンを固定しているため、個別にインストールする必要はありません。
+
+## セットアップ
 
 ```bash
-# 依存関係のダウンロード
-go mod download
+# mise.toml に定義された Go をインストール
+mise install
+
+# Go モジュールの依存関係をダウンロード
+mise run setup
+```
+
+利用可能なタスクは次のコマンドで確認できます。
+
+```bash
+mise tasks ls
+```
+
+## 開発コマンド
+
+```bash
+# ソースコードのフォーマット
+mise run fmt
+
+# テスト
+mise run test
+
+# 静的解析
+mise run vet
+
+# テストと静的解析をまとめて実行
+mise run check
 
 # バイナリのビルド
-go build -o tc-analyzer ./cmd/tc-analyzer
+mise run build
+
+# CLI をソースから実行（例: ヘルプ表示）
+mise run tc --help
 ```
+
+Windows では `tc-analyzer.exe`、macOS/Linux では `tc-analyzer` がプロジェクトルートに生成されます。
 
 ## クイックスタート
 
@@ -33,26 +65,26 @@ go build -o tc-analyzer ./cmd/tc-analyzer
 TwitCasting API の認証情報を設定します。
 
 ```bash
-./tc-analyzer config set --client-id <CLIENT_ID> --client-secret <CLIENT_SECRET>
+mise run tc config set --client-id <CLIENT_ID> --client-secret <CLIENT_SECRET>
 
 # 設定確認・接続テスト
-./tc-analyzer config show --verify
+mise run tc config show --verify
 ```
 
 ### 2. 配信の監視・データ収集
 
 ```bash
 # 現在配信中のライブを監視
-./tc-analyzer watch <user_id>
+mise run tc watch <user_id>
 
 # オフラインの場合でも配信開始まで待機して監視
-./tc-analyzer watch <user_id> -w
+mise run tc watch <user_id> -w
 ```
 
 ### 3. ダッシュボードの起動
 
 ```bash
-./tc-analyzer dashboard --port 8080
+mise run tc dashboard --port 8080
 ```
 
 ブラウザで <http://localhost:8080> を開くと、グラフやセッション情報を確認できます。`--port` を省略した場合のポートは 8000 です。
@@ -69,6 +101,7 @@ internal/
   db/                SQLite データベース操作
   monitor/           監視ループ・待機ロジック
 design/              詳細設計ドキュメント群
+mise.toml            Go バージョンと開発タスクの定義
 ```
 
 ## ライセンス

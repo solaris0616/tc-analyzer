@@ -7,8 +7,9 @@
 *.dll
 *.so
 *.dylib
+/tc-analyzer
 
-# Test binary, built with `go test -c`
+# Test binary, built with go test -c
 *.test
 
 # Code coverage profiles and other test artifacts
@@ -27,6 +28,16 @@ go.work.sum
 # env file
 .env
 
+# Database files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+data.db
+
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store

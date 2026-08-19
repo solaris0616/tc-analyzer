@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -23,6 +24,10 @@ func NewExportCmd() *cobra.Command {
 			movieID := args[0]
 			outPath, _ := cmd.Flags().GetString("output")
 			format, _ := cmd.Flags().GetString("format")
+			format = strings.ToLower(strings.TrimSpace(format))
+			if format != "csv" && format != "json" {
+				return fmt.Errorf("未対応のフォーマット %q です。csv または json を指定してください", format)
+			}
 
 			if outPath == "" {
 				ext := ".csv"

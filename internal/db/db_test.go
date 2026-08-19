@@ -3,6 +3,7 @@ package db
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"tc-analyzer/internal/api"
 )
@@ -120,5 +121,80 @@ func TestDBOperations(t *testing.T) {
 	}
 	if len(analysis) == 0 {
 		t.Errorf("expected analysis data, got empty")
+	}
+}
+
+func TestRecordCommentIgnoresDuplicateWithoutIncrementingCommenter(t *testing.T) {
+	database, err := New(filepath.Join(t.TempDir(), "comments.db"))
+	if err != nil {
+		t.Fatalf("failed to create db: %v", err)
+	}
+	defer database.Close()
+
+	createdAt := time.Now().Unix()
+	inserted, err := database.RecordComment("movie_1", "comment_1", "user_1", "screen_1", "User 1", "hello", createdAt)
+	if err != nil {
+		t.Fatalf("RecordComment failed: %v", err)
+	}
+	if !inserted {
+		t.Fatal("expected first comment to be inserted")
+	}
+
+	inserted, err = database.RecordComment("movie_1", "comment_1", "user_1", "screen_1", "User 1", "hello", createdAt)
+	if err != nil {
+		t.Fatalf("duplicate RecordComment failed: %v", err)
+	}
+	if inserted {
+		t.Fatal("expected duplicate comment to be ignored")
+	}
+
+	commenters, err := database.ListCommenters("movie_1")
+	if err != nil {
+		t.Fatalf("ListCommenters failed: %v", err)
+	}
+	if len(commenters) != 1 || commenters[0].CommentCount != 1 {
+		t.Fatalf("duplicate comment changed commenter count: %+v", commenters)
+	}
+}
+
+func TestListMoviesUsesLatestSessionMetadata(t *testing.T) {
+	database, err := New(filepath.Join(t.TempDir(), "movies.db"))
+	if err != nil {
+		t.Fatalf("failed to create db: %v", err)
+	}
+	defer database.Close()
+
+	firstID, err := database.CreateSession("movie_1", 10, "old label")
+	if err != nil {
+		t.Fatalf("CreateSession first failed: %v", err)
+	}
+	if err := database.UpdateSessionTitle(firstID, "old title"); err != nil {
+		t.Fatalf("UpdateSessionTitle first failed: %v", err)
+	}
+	if _, err := database.AddSnapshot(firstID, &api.MovieSnapshot{IsLive: true}, 0, 0); err != nil {
+		t.Fatalf("AddSnapshot first failed: %v", err)
+	}
+
+	latestID, err := database.CreateSession("movie_1", 30, "latest label")
+	if err != nil {
+		t.Fatalf("CreateSession latest failed: %v", err)
+	}
+	if err := database.UpdateSessionTitle(latestID, "latest title"); err != nil {
+		t.Fatalf("UpdateSessionTitle latest failed: %v", err)
+	}
+	if _, err := database.AddSnapshot(latestID, &api.MovieSnapshot{IsLive: true}, 0, 0); err != nil {
+		t.Fatalf("AddSnapshot latest failed: %v", err)
+	}
+
+	movies, err := database.ListMovies()
+	if err != nil {
+		t.Fatalf("ListMovies failed: %v", err)
+	}
+	if len(movies) != 1 {
+		t.Fatalf("expected one grouped movie, got %d", len(movies))
+	}
+	got := movies[0]
+	if got.Label != "latest label" || got.Title != "latest title" || got.IntervalSec != 30 || got.TotalRecords != 2 {
+		t.Fatalf("ListMovies did not use latest metadata and aggregate records: %+v", got)
 	}
 }

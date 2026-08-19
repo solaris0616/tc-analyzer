@@ -264,17 +264,33 @@ func (d *DB) GetLatestSessionByMovie(movieID string) (*Session, error) {
 // ListMovies returns grouped movies.
 func (d *DB) ListMovies() ([]*MovieListRow, error) {
 	query := `
-SELECT 
-    s.movie_id,
-    MIN(s.started_at) AS started_at,
-    COALESCE(MAX(s.label), '') AS label,
-    s.interval_sec,
-    COUNT(sn.id) AS total_records,
-    COALESCE(MAX(s.title), '') AS title
-FROM sessions s
-LEFT JOIN snapshots sn ON s.id = sn.session_id
-GROUP BY s.movie_id
-ORDER BY s.id DESC
+WITH latest_sessions AS (
+    SELECT s.*
+    FROM sessions s
+    JOIN (
+        SELECT movie_id, MAX(id) AS id
+        FROM sessions
+        GROUP BY movie_id
+    ) latest ON latest.id = s.id
+), movie_totals AS (
+    SELECT
+        s.movie_id,
+        MIN(s.started_at) AS started_at,
+        COUNT(sn.id) AS total_records
+    FROM sessions s
+    LEFT JOIN snapshots sn ON sn.session_id = s.id
+    GROUP BY s.movie_id
+)
+SELECT
+    latest.movie_id,
+    totals.started_at,
+    COALESCE(latest.label, ''),
+    latest.interval_sec,
+    totals.total_records,
+    COALESCE(latest.title, '')
+FROM latest_sessions latest
+JOIN movie_totals totals ON totals.movie_id = latest.movie_id
+ORDER BY latest.id DESC
 `
 	rows, err := d.db.Query(query)
 	if err != nil {
@@ -578,11 +594,36 @@ func parseISO(iso string) (time.Time, error) {
 	return time.Parse(time.RFC3339, iso)
 }
 
-// UpsertCommenter inserts or updates a commenter record for a movie.
-// On conflict (same movie_id + user_id) it increments comment_count and updates last_seen_at and name.
-func (d *DB) UpsertCommenter(movieID, userID, screenID, name string) error {
+// RecordComment atomically inserts a comment log and updates its commenter stats.
+// Duplicate comment IDs are ignored without incrementing the commenter count.
+func (d *DB) RecordComment(movieID, commentID, userID, screenID, name, message string, createdAt int64) (bool, error) {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	createdAtStr := time.Unix(createdAt, 0).UTC().Format(time.RFC3339)
+	res, err := tx.Exec(`
+INSERT OR IGNORE INTO comment_logs (movie_id, comment_id, user_id, screen_id, message, created_at)
+VALUES (?, ?, ?, ?, ?, ?)
+`, movieID, commentID, userID, screenID, message, createdAtStr)
+	if err != nil {
+		return false, err
+	}
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if inserted == 0 {
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := d.db.Exec(`
+	if _, err := tx.Exec(`
 INSERT INTO commenters (movie_id, user_id, screen_id, name, comment_count, first_seen_at, last_seen_at)
 VALUES (?, ?, ?, ?, 1, ?, ?)
 ON CONFLICT(movie_id, user_id) DO UPDATE SET
@@ -590,18 +631,14 @@ ON CONFLICT(movie_id, user_id) DO UPDATE SET
     last_seen_at  = excluded.last_seen_at,
     name          = excluded.name,
     screen_id     = excluded.screen_id
-`, movieID, userID, screenID, name, now, now)
-	return err
-}
+`, movieID, userID, screenID, name, now, now); err != nil {
+		return false, err
+	}
 
-// AddCommentLog inserts a single comment log entry. Silently ignores duplicate comment_id.
-func (d *DB) AddCommentLog(movieID, commentID, userID, screenID, message string, createdAt int64) error {
-	ts := time.Unix(createdAt, 0).UTC().Format(time.RFC3339)
-	_, err := d.db.Exec(`
-INSERT OR IGNORE INTO comment_logs (movie_id, comment_id, user_id, screen_id, message, created_at)
-VALUES (?, ?, ?, ?, ?, ?)
-`, movieID, commentID, userID, screenID, message, ts)
-	return err
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ListCommenters returns all commenters for a movie, ordered by comment count descending.

@@ -1,4 +1,4 @@
-# tc-analyzer (TwitCasting Data Collector - Go版)
+# tc-analyzer
 
 TwitCasting.tv の特定配信を定期ポーリングし、同時視聴者数・コメント数・累計視聴数などのデータを自動収集・可視化する CLI ツールです。
 

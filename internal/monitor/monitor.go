@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
+	"sync"
 	"time"
 
 	"github.com/gosuri/uilive"
@@ -92,28 +92,30 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
 	if commentInterval <= 0 {
 		commentInterval = 15 * time.Second
 	}
-	stopComments := make(chan struct{})
+	commentCtx, cancelComments := context.WithCancel(ctx)
+	var commentWG sync.WaitGroup
+	commentWG.Add(1)
 	go func() {
-		defer close(stopComments)
+		defer commentWG.Done()
 		ticker := time.NewTicker(commentInterval)
 		defer ticker.Stop()
 		var sliceID string
 		for {
 			select {
-			case <-ctx.Done():
+			case <-commentCtx.Done():
 				return
 			case <-ticker.C:
-				resp, err := client.GetComments(ctx, movieID, sliceID, 50)
+				resp, err := client.GetComments(commentCtx, movieID, sliceID, 50)
 				if err != nil {
+					if commentCtx.Err() != nil {
+						return
+					}
 					log.Printf("⚠ コメント取得エラー: %v\n", err)
 					continue
 				}
 				for _, c := range resp.Comments {
-					if err := database.AddCommentLog(movieID, c.ID, c.FromUser.ID, c.FromUser.ScreenID, c.Message, c.Created); err != nil {
-						log.Printf("⚠ コメントログ保存エラー: %v\n", err)
-					}
-					if err := database.UpsertCommenter(movieID, c.FromUser.ID, c.FromUser.ScreenID, c.FromUser.Name); err != nil {
-						log.Printf("⚠ コメンターUPSERTエラー: %v\n", err)
+					if _, err := database.RecordComment(movieID, c.ID, c.FromUser.ID, c.FromUser.ScreenID, c.FromUser.Name, c.Message, c.Created); err != nil {
+						log.Printf("⚠ コメント保存エラー: %v\n", err)
 					}
 					// Track newest comment ID for next incremental fetch
 					if sliceID == "" || c.ID > sliceID {
@@ -122,6 +124,10 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
 				}
 			}
 		}
+	}()
+	defer func() {
+		cancelComments()
+		commentWG.Wait()
 	}()
 
 	ticker := time.NewTicker(opts.Interval)
@@ -316,6 +322,3 @@ func formatDuration(d time.Duration) string {
 	}
 	return fmt.Sprintf("%02d:%02d", m, s)
 }
-
-// Dummy log file usage suppress
-var _ = os.Stderr

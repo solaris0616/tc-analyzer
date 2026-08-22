@@ -43,6 +43,9 @@ mise run fmt
 # テスト
 mise run test
 
+# キャッシュなしテスト
+mise run test-uncached
+
 # 静的解析
 mise run vet
 
@@ -52,11 +55,18 @@ mise run check
 # バイナリのビルド
 mise run build
 
+# フォーマット・テスト・静的解析・ビルド・資料の一括検証
+mise run verify
+
 # CLI をソースから実行（例: ヘルプ表示）
 mise run tc --help
 ```
 
 Windows では `tc-analyzer.exe`、macOS/Linux では `tc-analyzer` がプロジェクトルートに生成されます。
+
+エージェント向けの索引と開発工程は[AGENTS.md](AGENTS.md)にあります。エージェント、スキル、工程別インストラクション、クロスプラットフォームな検証ツールは`.codex/`配下で管理します。
+
+検証ツールはGoで実装し、Windows、macOS、LinuxのCIで`mise run verify`を実行します。
 
 ## クイックスタート
 

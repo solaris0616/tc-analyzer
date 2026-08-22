@@ -2,8 +2,7 @@
 
 ## 1. 概要
 
-Python 版 `config.py` に相当する設定管理モジュール。
-Go 版では、デファクトスタンダードである `github.com/spf13/viper` を使用し、設定ファイル、環境変数、CLI フラグ、およびデフォルト値を統一的に管理する。
+`github.com/spf13/viper` を使用し、設定ファイル、環境変数、CLIフラグ、およびデフォルト値を統一的に管理する。
 
 **優先順位（高い順）**: CLI フラグ > 環境変数 > 設定ファイル > デフォルト値
 
@@ -17,7 +16,7 @@ Go 版では、デファクトスタンダードである `github.com/spf13/vipe
 | 設定ファイル名 | `config.toml` |
 | DB ファイル名 | `data.db` |
 
-### config.toml フォーマット（Python 版互換）
+### config.toml フォーマット
 
 ```toml
 # TwitCasting Data Collector 設定ファイル
@@ -142,7 +141,7 @@ func Load(configPath string) (*Config, error) {
 
 ## 6. Save() 実装詳細
 
-Viper に直接 TOML を書き出させるとコメントやフォーマットが消えてしまうため、Python版互換のカスタムテンプレート文字列を用いて書き出す。書き出し成功後、Viper インスタンスの内部バッファにも同期する。
+Viper に直接 TOML を書き出させるとコメントやフォーマットが消えてしまうため、カスタムテンプレート文字列を用いて書き出す。書き出し成功後、Viper インスタンスの内部バッファにも同期する。
 
 ```go
 func Save(configPath string, cfg *Config) error {
@@ -183,14 +182,3 @@ default_duration = %d
     return nil
 }
 ```
-
----
-
-## 7. Python 版との差分
-
-| 項目 | Python 版 | Go 版 (Viper) |
-|---|---|---|
-| パーサー | `tomllib` / `tomli` | `github.com/spf13/viper` |
-| 環境変数バインド | 自前でマッピング | `viper.AutomaticEnv` による自動結合 |
-| フラグ結合 | 手動解決 | Cobra フラグと `viper.BindPFlag` でマージ可能 |
-| デフォルト指定 | コード上での分岐 | `viper.SetDefault` による一元管理 |

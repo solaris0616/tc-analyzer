@@ -2,14 +2,14 @@
 
 ## 1. 概要
 
-Python 版 `monitor.py` に相当する、配信データの定期ポーリング（監視）および配信開始の待機を行うコアロジック。
-Go 版では、`goroutine` と `context.Context`、`time` パッケージを活用して堅牢かつキャンセル可能なループを構築する。
+配信データの定期ポーリング（監視）および配信開始の待機を行うコアロジック。
+`goroutine`と`context.Context`、`time`パッケージを活用してキャンセル可能なループを構築する。
 
 ---
 
 ## 2. 主要機能と設計方針
 
-Go 版の監視・待機処理では、以下の設計方針を適用する。
+監視・待機処理では、以下の設計方針を適用する。
 
 1. **Context による制御**: `Ctrl+C` やタイムアウトによる監視停止要求を伝播させるため、すべての主要関数は `context.Context` を第一引数に受け取る。
 2. **非同期ポーリングとタイマー調整**: ポーリング処理の実行時間を差し引いて次のポーリング開始時刻を正確に制御する（`time.Ticker` または `time.After` を使用）。
@@ -25,6 +25,7 @@ package monitor
 
 import (
     "context"
+    "io"
     "time"
     
     "tc-analyzer/internal/api"
@@ -39,7 +40,9 @@ type MonitorOptions struct {
     WaitOnConfig bool          // オフライン時に配信開始を待機するかどうか (-w/--wait)
     WaitInterval time.Duration // 待機時の配信状態チェック間隔
     WaitTimeout  time.Duration // 最大待機時間 (0 = 無限)
+    Writer       io.Writer     // 出力先（省略時はuilive）
     OnSnapshot   func(snap *api.MovieSnapshot, sessionID int64) // スナップショット取得時のコールバック（テスト用）
+    CommentInterval time.Duration // コメント取得間隔（省略時は15秒）
 }
 
 // MonitorMovie は指定されたユーザーの配信を監視する。
@@ -48,7 +51,7 @@ type MonitorOptions struct {
 func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, userID string, opts MonitorOptions) (int64, error)
 
 // waitForLive は指定ユーザーが配信開始するまで待機する内部ヘルパー
-func waitForLive(ctx context.Context, client *api.Client, userID string, pollInterval, timeout time.Duration) (string, error)
+func waitForLive(ctx context.Context, client *api.Client, userID string, pollInterval, timeout time.Duration, out io.Writer) (*api.MovieSnapshot, error)
 ```
 
 ---
@@ -57,10 +60,13 @@ func waitForLive(ctx context.Context, client *api.Client, userID string, pollInt
 
 ### 4.1. ライフサイクルとループ制御
 
+以下は配信メトリクスを保存するポーリング部分の抜粋である。コメントは`CommentInterval`（デフォルト15秒）ごとに独立したgoroutineで取得し、監視終了時にキャンセルして終了を待つ。
+
 ```go
 func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, userID string, opts MonitorOptions) (int64, error) {
     // 0. ユーザーの存在確認（数値IDを含め、存在しないユーザーへの無限待機を防ぐ）
-    if _, err := client.GetUser(ctx, userID); err != nil {
+    user, err := client.GetUser(ctx, userID)
+    if err != nil {
         var apiErr *api.APIError
         if errors.As(err, &apiErr) && apiErr.HTTPStatus == 404 {
             return 0, fmt.Errorf("ユーザー @%s は存在しません", userID)
@@ -83,16 +89,33 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
             return 0, fmt.Errorf("ユーザー @%s は現在オフラインです。監視を開始するには -w/--wait フラグを指定してください。", userID)
         }
         // 配信開始を待機
-        id, err := waitForLive(ctx, client, userID, opts.WaitInterval, opts.WaitTimeout)
+        liveSnapshot, err := waitForLive(ctx, client, userID, opts.WaitInterval, opts.WaitTimeout, opts.Writer)
         if err != nil {
             return 0, err
         }
-        movieID = id
+        snapshot = liveSnapshot
+        movieID = snapshot.MovieID
     }
 
     // 2. セッションの作成 (Movie ID が決定した段階で行う)
-    intervalSec := int(opts.Interval.Seconds())
-    sessionID, err := database.CreateSession(movieID, intervalSec, opts.Label)
+    broadcaster := db.Broadcaster{
+        ID:       snapshot.BroadcasterID,
+        ScreenID: snapshot.BroadcasterScreenID,
+        Name:     snapshot.BroadcasterName,
+    }
+    if broadcaster.ID == "" {
+        broadcaster.ID = user.ID
+    }
+    if broadcaster.ScreenID == "" {
+        broadcaster.ScreenID = user.ScreenID
+    }
+    if broadcaster.Name == "" {
+        broadcaster.Name = user.Name
+    }
+    if broadcaster.ID == "" {
+        return 0, fmt.Errorf("配信者IDを取得できませんでした")
+    }
+    sessionID, err := database.CreateSessionWithBroadcaster(movieID, opts.Label, broadcaster)
     if err != nil {
         return 0, err
     }
@@ -113,10 +136,14 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
     ticker := time.NewTicker(opts.Interval)
     defer ticker.Stop()
 
-    // 監視ライターの開始
-    writer := uilive.New()
-    writer.Start()
-    defer writer.Stop()
+    // Writer指定時はその出力先を使い、省略時だけuiliveを開始する
+    outWriter := opts.Writer
+    if outWriter == nil {
+        liveWriter := uilive.New()
+        liveWriter.Start()
+        defer liveWriter.Stop()
+        outWriter = liveWriter
+    }
 
     runPoll := func() bool {
         pollCount++
@@ -127,8 +154,17 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
             log.Printf("⚠ API エラー (poll #%d): %v\n", pollCount, err)
             return true
         }
+        // 配信がオフラインになったら保存せず終了
+        if !snapshot.IsLive {
+            fmt.Fprintln(outWriter, "\n⚠ 配信がオフラインになりました。定期監視を自動終了します。")
+            return false
+        }
+        if snapshot.BroadcasterID != "" && snapshot.BroadcasterID != broadcaster.ID {
+            log.Printf("⚠ 配信者IDが変化したため保存しません")
+            return true
+        }
 
-        // コメント増分の算出
+        // コメント増分の算出（ライブ表示専用。DBには保存しない）
         commentDelta := 0
         if prevCommentCount != nil {
             delta := snapshot.CommentCount - *prevCommentCount
@@ -147,9 +183,12 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
         elapsedSec := int(time.Since(startTime).Seconds())
 
         // DBへの保存
-        _, err = database.AddSnapshot(sessionID, snapshot, elapsedSec, commentDelta)
+        _, err = database.AddSnapshot(sessionID, snapshot)
         if err != nil {
             log.Printf("⚠ DB 保存エラー: %v\n", err)
+        }
+        if snapshot.Title != "" {
+            _ = database.UpdateSessionTitle(sessionID, snapshot.Title)
         }
 
         if opts.OnSnapshot != nil {
@@ -157,13 +196,7 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
         }
 
         // TUI画面の更新
-        updateLivePanel(writer, snapshot, elapsedSec, pollCount, commentDelta, int(opts.Interval.Seconds()), maxViewersSeen, sessionID)
-
-        // 配信がオフラインになったら終了
-        if !snapshot.IsLive {
-            fmt.Println("\n[yellow]⚠ 配信がオフラインになりました。定期監視を自動終了します。[/yellow]")
-            return false
-        }
+        updateLivePanel(outWriter, snapshot, elapsedSec, pollCount, commentDelta, int(opts.Interval.Seconds()), maxViewersSeen, sessionID)
 
         return true
     }
@@ -177,7 +210,7 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
         select {
         case <-ctx.Done():
             if ctx.Err() == context.DeadlineExceeded && opts.Duration > 0 {
-                fmt.Println("\n[cyan]監視時間（duration）に達したため、監視を終了します。[/cyan]")
+                fmt.Fprintln(outWriter, "\n監視時間 (duration) に達したため、監視を終了します。")
             }
             return sessionID, nil
         case <-ticker.C:
@@ -196,7 +229,7 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
 ### 5.1. 配信待機ループ
 
 ```go
-func waitForLive(ctx context.Context, client *api.Client, userID string, pollInterval, timeout time.Duration) (string, error) {
+func waitForLive(ctx context.Context, client *api.Client, userID string, pollInterval, timeout time.Duration, out io.Writer) (*api.MovieSnapshot, error) {
     startTime := time.Now()
     checkCount := 0
 
@@ -210,42 +243,50 @@ func waitForLive(ctx context.Context, client *api.Client, userID string, pollInt
     ticker := time.NewTicker(pollInterval)
     defer ticker.Stop()
 
-    runCheck := func() (string, bool, error) {
+    outWriter := out
+    if outWriter == nil {
+        liveWriter := uilive.New()
+        liveWriter.Start()
+        defer liveWriter.Stop()
+        outWriter = liveWriter
+    }
+
+    runCheck := func() (*api.MovieSnapshot, bool, error) {
         checkCount++
         
         // ユーザーの現在のライブ情報を取得
         snapshot, err := client.GetCurrentLive(ctx, userID)
         if err != nil {
             log.Printf("⚠ API エラー (確認 #%d): %v\n", checkCount, err)
-            return "", false, nil // リトライするためループは継続
+            return nil, false, nil // リトライするためループは継続
         }
 
         if snapshot != nil && snapshot.IsLive {
-            return snapshot.MovieID, true, nil // 配信開始検出
+            return snapshot, true, nil // 配信開始検出
         }
 
         // コンソール表示の更新 (待機中ステータス)
         elapsedSec := int(time.Since(startTime).Seconds())
-        updateWaitPanel(userID, checkCount, elapsedSec, timeout, pollInterval)
+        updateWaitPanel(outWriter, userID, checkCount, elapsedSec, timeout, pollInterval)
 
-        return "", false, nil
+        return nil, false, nil
     }
 
     // 初回チェック
-    if movieID, found, err := runCheck(); found || err != nil {
-        return movieID, err
+    if snapshot, found, err := runCheck(); found || err != nil {
+        return snapshot, err
     }
 
     for {
         select {
         case <-ctx.Done():
             if ctx.Err() == context.DeadlineExceeded {
-                return "", fmt.Errorf("timeout waiting for user @%s to go live", userID)
+                return nil, fmt.Errorf("ユーザー @%s の配信開始待機がタイムアウトしました", userID)
             }
-            return "", ctx.Err()
+            return nil, ctx.Err()
         case <-ticker.C:
-            if movieID, found, err := runCheck(); found || err != nil {
-                return movieID, err
+            if snapshot, found, err := runCheck(); found || err != nil {
+                return snapshot, err
             }
         }
     }
@@ -256,26 +297,27 @@ func waitForLive(ctx context.Context, client *api.Client, userID string, pollInt
 
 ## 6. コンソール表示 (TUI) の実装アプローチ
 
-Python 版では `rich.live.Live` を使用して、ターミナル上で表をインプレースで更新していた。Go 版では、同様のちらつきのないライブ更新とリサイズ破綻防止のために **`github.com/gosuri/uilive`** を採用する。
+ターミナル表示をちらつきなくインプレース更新するため、**`github.com/gosuri/uilive`** を使用する。
 
 ### uilive を用いた更新設計
 
-`uilive.Writer` を監視ループ開始時に初期化し、ループ内の表示更新処理でそのライターに対して描画内容を出力する。
+`MonitorOptions.Writer`が指定されていればその出力先を使用し、省略時だけ`uilive.Writer`を初期化する。
 
 ```go
 import "github.com/gosuri/uilive"
 
 func MonitorMovie(...) {
-    // uilive ライターの開始
-    writer := uilive.New()
-    writer.Start()
-    defer writer.Stop()
+    outWriter := opts.Writer
+    if outWriter == nil {
+        writer := uilive.New()
+        writer.Start()
+        defer writer.Stop()
+        outWriter = writer
+    }
 
     runPoll := func() bool {
         ...
-        // writer.Bypass を使えば通常のログ（エラー等）を出力に混ぜても表示が壊れない
-        // 描画バッファへの書き込み
-        updateLivePanel(writer, snapshot, elapsedSec, pollCount, commentDelta, interval, maxViewersSeen, sessionID)
+        updateLivePanel(outWriter, snapshot, elapsedSec, pollCount, commentDelta, interval, maxViewersSeen, sessionID)
         ...
     }
 }
@@ -306,13 +348,3 @@ func updateLivePanel(w io.Writer, snap *api.MovieSnapshot, elapsedSec, pollCount
     fmt.Fprintf(w, "=============================================\n")
 }
 ```
-
----
-
-## 7. Python 版との比較・主要な設計差分
-
-| 調査項目 | Python 版 | Go 版 |
-|---|---|---|
-| 非同期/並行処理 | `anyio` / `asyncio` による `sleep` | `select` + `time.Ticker` と `context.Context` |
-| キャンセル処理 | `KeyboardInterrupt` による例外処理 | `context.Context` シグナル通知による安全な終了 |
-| 終了条件判定 | ポーリングループ内の `is_live` チェック | チャネル経由での状態監視、および context タイムアウト判定 |

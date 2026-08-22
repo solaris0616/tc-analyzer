@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 func TestMonitorMovie(t *testing.T) {
 	mux := http.NewServeMux()
+	moviePolls := 0
 
 	mux.HandleFunc("/users/test_user", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -44,13 +46,15 @@ func TestMonitorMovie(t *testing.T) {
 	})
 
 	mux.HandleFunc("/movies/movie_123", func(w http.ResponseWriter, r *http.Request) {
+		moviePolls++
+		isLive := moviePolls == 1
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{
+		fmt.Fprintf(w, `{
 			"movie": {
 				"id": "movie_123",
 				"title": "Live Title",
-				"is_live": false,
+				"is_live": %t,
 				"comment_count": 12,
 				"current_view_count": 0,
 				"max_view_count": 60,
@@ -59,7 +63,7 @@ func TestMonitorMovie(t *testing.T) {
 				"created": 1700000000
 			},
 			"broadcaster": {"id":"100","screen_id":"test_user","name":"Test User"}
-		}`))
+		}`, isLive)
 	})
 
 	server := httptest.NewServer(mux)
@@ -104,8 +108,8 @@ func TestMonitorMovie(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get snapshots: %v", err)
 	}
-	if len(snaps) == 0 {
-		t.Fatalf("expected snapshots in database")
+	if len(snaps) != 1 {
+		t.Fatalf("expected only the live snapshot in database, got %d", len(snaps))
 	}
 	session, err := database.GetSession(sessionID)
 	if err != nil {
@@ -169,5 +173,52 @@ func TestMonitorMovieCancelsCommentPollingOnNaturalEnd(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	if got := commentPolls.Load(); got != pollsAtReturn {
 		t.Fatalf("comment polling continued after MonitorMovie returned: before=%d after=%d", pollsAtReturn, got)
+	}
+}
+
+func TestMonitorMovieStopsWhenOfflineBroadcasterDiffers(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/test_user", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"user":{"id":"100","screen_id":"test_user","name":"Test User"}}`))
+	})
+	mux.HandleFunc("/users/test_user/current_live", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"movie":{"id":"movie_123","is_live":true},"broadcaster":{"id":"100","screen_id":"test_user","name":"Test User"}}`))
+	})
+	mux.HandleFunc("/movies/movie_123", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"movie":{"id":"movie_123","is_live":false},"broadcaster":{"id":"999","screen_id":"other","name":"Other"}}`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := api.NewClient("id", "secret", time.Second)
+	client.SetBaseURL(server.URL)
+	database, err := db.New(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	var buf bytes.Buffer
+	sessionID, err := MonitorMovie(context.Background(), client, database, "test_user", MonitorOptions{
+		Interval: 10 * time.Millisecond,
+		Duration: 200 * time.Millisecond,
+		Writer:   &buf,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "オフライン") {
+		t.Fatalf("monitor did not stop on the offline response: %q", buf.String())
+	}
+	snapshots, err := database.GetSnapshots(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 0 {
+		t.Fatalf("offline response was stored: %+v", snapshots)
 	}
 }

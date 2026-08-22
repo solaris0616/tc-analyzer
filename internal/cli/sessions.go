@@ -43,11 +43,10 @@ func NewSessionsCmd() *cobra.Command {
 			}
 
 			headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-			fmt.Printf("%-6s | %-12s | %-20s | %-8s | %s\n",
+			fmt.Printf("%-6s | %-12s | %-20s | %s\n",
 				headerStyle.Render("ID"),
 				headerStyle.Render("Movie ID"),
 				headerStyle.Render("開始日時 (UTC)"),
-				headerStyle.Render("間隔"),
 				headerStyle.Render("ラベル"),
 			)
 			fmt.Println("--------------------------------------------------------------------------------")
@@ -58,8 +57,8 @@ func NewSessionsCmd() *cobra.Command {
 					label = "-"
 				}
 				startedStr := s.StartedAt.Format("2006-01-02 15:04:05")
-				fmt.Printf("%-6d | %-12s | %-20s | %-6ds | %s\n",
-					s.ID, s.MovieID, startedStr, s.IntervalSec, label)
+				fmt.Printf("%-6d | %-12s | %-20s | %s\n",
+					s.ID, s.MovieID, startedStr, label)
 			}
 
 			return nil

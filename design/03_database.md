@@ -2,12 +2,11 @@
 
 ## 1. 概要
 
-Python 版 `db.py` に相当する SQLite データアクセス層。
-`modernc.org/sqlite` (pure Go, CGO 不要) を使用する。
+`modernc.org/sqlite`（pure Go、CGO不要）を使用するSQLiteデータアクセス層。
 
 ---
 
-## 2. スキーマ（Python 版と完全互換）
+## 2. スキーマ
 
 ```sql
 CREATE TABLE IF NOT EXISTS sessions (
@@ -15,32 +14,57 @@ CREATE TABLE IF NOT EXISTS sessions (
     movie_id     TEXT    NOT NULL,
     started_at   TEXT    NOT NULL,   -- ISO8601 UTC 例: 2024-01-15T10:30:00+00:00
     label        TEXT,               -- ユーザーが付けたラベル (NULL 可)
-    interval_sec INTEGER NOT NULL DEFAULT 10,
+    title        TEXT,
     broadcaster_id        TEXT,
     broadcaster_screen_id TEXT,
     broadcaster_name      TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_sessions_broadcaster
+    ON sessions(broadcaster_id, movie_id, started_at);
+
 CREATE TABLE IF NOT EXISTS snapshots (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id          INTEGER NOT NULL REFERENCES sessions(id),
     recorded_at         TEXT    NOT NULL,   -- ISO8601 UTC
-    elapsed_sec         INTEGER NOT NULL,   -- セッション開始からの経過秒数
-    is_live             INTEGER NOT NULL,   -- 0 or 1
     current_view_count  INTEGER NOT NULL,
     max_view_count      INTEGER NOT NULL,
     total_view_count    INTEGER NOT NULL,
     comment_count       INTEGER NOT NULL,
-    comment_delta       INTEGER NOT NULL,   -- 前回からのコメント増分
     duration            INTEGER NOT NULL    -- 配信経過秒数（APIから）
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_session ON snapshots(session_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_snapshots_movie   ON snapshots(session_id);
+
+CREATE TABLE IF NOT EXISTS commenters (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    movie_id      TEXT    NOT NULL,
+    user_id       TEXT    NOT NULL,
+    screen_id     TEXT    NOT NULL,
+    name          TEXT    NOT NULL,
+    comment_count INTEGER NOT NULL DEFAULT 1,
+    first_seen_at TEXT    NOT NULL,
+    last_seen_at  TEXT    NOT NULL,
+    UNIQUE(movie_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_commenters_movie ON commenters(movie_id);
+
+CREATE TABLE IF NOT EXISTS comment_logs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    movie_id    TEXT    NOT NULL,
+    comment_id  TEXT    NOT NULL UNIQUE,
+    user_id     TEXT    NOT NULL,
+    screen_id   TEXT    NOT NULL,
+    message     TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_comment_logs_movie ON comment_logs(movie_id, created_at);
 ```
 
-> **重要**: このスキーマは Python 版と完全に同一にする。
-> Python 版で収集した DB をそのまま Go 版で参照できる。
+> **重要**: 導出可能な `interval_sec`、`elapsed_sec`、`is_live`、`comment_delta` は保持しない。
 
 ---
 
@@ -53,11 +77,14 @@ import "time"
 
 // Session は sessions テーブルの 1 行を表す
 type Session struct {
-    ID          int64
-    MovieID     string
-    StartedAt   time.Time
-    Label       string    // NULL の場合は空文字
-    IntervalSec int
+    ID                  int64
+    MovieID             string
+    StartedAt           time.Time
+    Label               string
+    Title               string
+    BroadcasterID       string
+    BroadcasterScreenID string
+    BroadcasterName     string
 }
 
 // Snapshot は snapshots テーブルの 1 行を表す
@@ -65,14 +92,12 @@ type Snapshot struct {
     ID               int64
     SessionID        int64
     RecordedAt       time.Time
-    ElapsedSec       int
-    IsLive           bool
     CurrentViewCount int
     MaxViewCount     int
     TotalViewCount   int
     CommentCount     int
-    CommentDelta     int
     Duration         int
+    CumulativeCommenters int // APIレスポンス用の算出値
 }
 
 // SessionSummary はセッション集計結果
@@ -94,8 +119,53 @@ type MovieListRow struct {
     MovieID      string
     StartedAt    time.Time
     Label        string
-    IntervalSec  int
     TotalRecords int
+    Title        string
+}
+
+type Broadcaster struct {
+    ID       string
+    ScreenID string
+    Name     string
+}
+
+type BroadcasterListRow struct {
+    ID           string
+    ScreenID     string
+    Name         string
+    MovieCount   int
+    SessionCount int
+    LastSeenAt   time.Time
+}
+
+type AnalysisRow struct {
+    DayOfWeek    int
+    HourOfDay    int
+    MinuteOfHour int
+    AvgViewers   float64
+    MaxViewers   int
+    DataPoints   int
+}
+
+type Commenter struct {
+    ID           int64
+    MovieID      string
+    UserID       string
+    ScreenID     string
+    Name         string
+    CommentCount int
+    FirstSeenAt  time.Time
+    LastSeenAt   time.Time
+}
+
+type CommentLog struct {
+    ID        int64
+    MovieID   string
+    CommentID string
+    UserID    string
+    ScreenID  string
+    Message   string
+    CreatedAt time.Time
 }
 ```
 
@@ -125,7 +195,7 @@ func (d *DB) Close() error
 
 ```go
 // CreateSession は新しい監視セッションを作成し、session_id を返す
-func (d *DB) CreateSession(movieID string, intervalSec int, label string) (int64, error)
+func (d *DB) CreateSession(movieID string, label string) (int64, error)
 
 // GetSession は session_id に対応するセッションを返す
 func (d *DB) GetSession(sessionID int64) (*Session, error)
@@ -148,8 +218,6 @@ func (d *DB) ListMovies() ([]*MovieListRow, error)
 func (d *DB) AddSnapshot(
     sessionID int64,
     snap *api.MovieSnapshot,
-    elapsedSec int,
-    commentDelta int,
 ) (int64, error)
 
 // GetSnapshots はセッションのスナップショット一覧を返す（昇順）
@@ -158,7 +226,7 @@ func (d *DB) GetSnapshots(sessionID int64) ([]*Snapshot, error)
 // GetLatestSnapshot はセッションの最新スナップショットを返す
 func (d *DB) GetLatestSnapshot(sessionID int64) (*Snapshot, error)
 
-// GetMovieSnapshots は movie_id に紐づく全スナップショット（is_live=1 のみ）を返す
+// GetMovieSnapshots は movie_id に紐づく全スナップショットを返す
 func (d *DB) GetMovieSnapshots(movieID string) ([]*Snapshot, error)
 ```
 
@@ -168,7 +236,7 @@ func (d *DB) GetMovieSnapshots(movieID string) ([]*Snapshot, error)
 // GetSessionSummary はセッション全体の集計サマリーを返す
 func (d *DB) GetSessionSummary(sessionID int64) (*SessionSummary, error)
 
-// GetMovieSummary は movie_id 全体の集計サマリー（is_live=1 のみ）を返す
+// GetMovieSummary は movie_id 全体の集計サマリーを返す
 func (d *DB) GetMovieSummary(movieID string) (*SessionSummary, error)
 ```
 
@@ -180,7 +248,7 @@ func (d *DB) GetMovieSummary(movieID string) (*SessionSummary, error)
 func (d *DB) GetAnalysisData(broadcasterID string) ([]*AnalysisRow, error)
 ```
 
-配信者別ダッシュボードの追加仕様、既存DBの移行、およびバックフィルについては
+配信者別ダッシュボードと配信者情報の補完については
 [設計書07](07_broadcaster_dashboard.md)を参照する。
 
 ---
@@ -189,7 +257,7 @@ func (d *DB) GetAnalysisData(broadcasterID string) ([]*AnalysisRow, error)
 
 ### New() の初期化フロー
 
-SQLite は並行で書き込みが発生した際に `database is locked` エラーとなりやすいため、Go版では以下の堅牢な初期化設定を行う。
+SQLiteは並行書き込みで`database is locked`エラーが発生しやすいため、以下の初期化設定を行う。
 1. DSN 接続文字列に `_busy_timeout=5000` を付与し、ロック時に即座にコケず5秒間リトライ・待機させる。
 2. `database/sql` の接続プール設定で `SetMaxOpenConns(1)` を指定し、書き込み衝突を Go レベルで直列化する。
 
@@ -226,20 +294,25 @@ func New(dbPath string) (*DB, error) {
 
 ### ISO8601 時刻変換
 
-Python 版は `datetime.now(timezone.utc).isoformat()` で保存している。
-Go 版では以下の形式を使用する：
+以下の形式でUTC時刻を保存する：
 
 ```go
 time.Now().UTC().Format(time.RFC3339)
 // 例: "2024-01-15T10:30:00Z"
 ```
 
-> **注意**: Python 版は `+00:00` 末尾、Go 版は `Z` 末尾になる場合がある。
-> SQLite の `strftime` は両方を正しく解釈するため互換性は問題なし。
-
-### GetMovieSummary SQL（Python 版互換の複雑なサブクエリ）
+### GetMovieSummary SQL
 
 ```sql
+WITH ordered AS (
+    SELECT sn.*,
+           LAG(sn.comment_count) OVER (
+               PARTITION BY sn.session_id ORDER BY sn.recorded_at, sn.id
+           ) AS previous_comment_count
+    FROM snapshots sn
+    JOIN sessions s ON sn.session_id = s.id
+    WHERE s.movie_id = ?
+)
 SELECT
     COUNT(*)                        AS total_records,
     MIN(current_view_count)         AS min_viewers,
@@ -256,21 +329,13 @@ SELECT
         MAX(total_view_count)
     )                               AS session_total_view,
     MAX(comment_count)              AS final_comment_count,
-    SUM(comment_delta)              AS total_comments_observed,
+    SUM(CASE
+        WHEN previous_comment_count IS NOT NULL
+         AND comment_count > previous_comment_count
+        THEN comment_count - previous_comment_count
+        ELSE 0
+    END)                            AS total_comments_observed,
     MIN(recorded_at)                AS first_record,
     MAX(recorded_at)                AS last_record
-FROM snapshots sn
-JOIN sessions s ON sn.session_id = s.id
-WHERE s.movie_id = ? AND sn.is_live = 1
+FROM ordered
 ```
-
----
-
-## 7. Python 版との差分
-
-| 項目 | Python 版 | Go 版 |
-|---|---|---|
-| ドライバー | `sqlite3` (標準ライブラリ) | `modernc.org/sqlite` (pure Go) |
-| 接続管理 | `contextmanager` + 毎回接続 | `*sql.DB` (接続プール) |
-| 行型 | `sqlite3.Row` (dict-like) | 専用の Go 構造体 |
-| トランザクション | `conn.commit()` / `conn.rollback()` | `database/sql` の `Tx` |

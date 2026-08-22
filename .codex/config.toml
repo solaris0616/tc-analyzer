@@ -1,0 +1,19 @@
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 3
+
+[agents.independent_reviewer]
+description = "設計・実装・テスト・最終差分を編集せず独立に監査するレビュー担当"
+config_file = "./agents/independent-reviewer.toml"
+
+[[skills.config]]
+path = "./skills/tc-development-cycle/SKILL.md"
+enabled = true
+
+[[skills.config]]
+path = "./skills/tc-schema-change/SKILL.md"
+enabled = true
+
+[[skills.config]]
+path = "./skills/tc-independent-review/SKILL.md"
+enabled = true

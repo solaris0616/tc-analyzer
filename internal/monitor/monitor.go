@@ -72,7 +72,6 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
 	}
 
 	// 2. Create database session
-	intervalSec := int(opts.Interval.Seconds())
 	broadcaster := db.Broadcaster{
 		ID:       snapshot.BroadcasterID,
 		ScreenID: snapshot.BroadcasterScreenID,
@@ -90,7 +89,7 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
 	if broadcaster.ID == "" {
 		return 0, fmt.Errorf("配信者IDを取得できませんでした")
 	}
-	sessionID, err := database.CreateSessionWithBroadcaster(movieID, intervalSec, opts.Label, broadcaster)
+	sessionID, err := database.CreateSessionWithBroadcaster(movieID, opts.Label, broadcaster)
 	if err != nil {
 		return 0, fmt.Errorf("セッションの作成に失敗しました: %w", err)
 	}
@@ -169,6 +168,10 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
 			log.Printf("⚠ API エラー (poll #%d): %v\n", pollCount, err)
 			return true
 		}
+		if !snap.IsLive {
+			fmt.Fprintln(outWriter, "\n⚠ 配信がオフラインになりました。定期監視を自動終了します。")
+			return false
+		}
 		if snap.BroadcasterID != "" && snap.BroadcasterID != broadcaster.ID {
 			log.Printf("⚠ 配信者IDが変化したためスナップショットを保存しません (expected=%s, actual=%s)\n", broadcaster.ID, snap.BroadcasterID)
 			return true
@@ -190,7 +193,7 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
 
 		elapsedSec := int(time.Since(startTime).Seconds())
 
-		if _, err := database.AddSnapshot(sessionID, snap, elapsedSec, commentDelta); err != nil {
+		if _, err := database.AddSnapshot(sessionID, snap); err != nil {
 			log.Printf("⚠ DB 保存エラー: %v\n", err)
 		}
 
@@ -202,12 +205,7 @@ func MonitorMovie(ctx context.Context, client *api.Client, database *db.DB, user
 			opts.OnSnapshot(snap, sessionID)
 		}
 
-		updateLivePanel(outWriter, snap, elapsedSec, pollCount, commentDelta, intervalSec, maxViewersSeen, sessionID)
-
-		if !snap.IsLive {
-			fmt.Fprintln(outWriter, "\n⚠ 配信がオフラインになりました。定期監視を自動終了します。")
-			return false
-		}
+		updateLivePanel(outWriter, snap, elapsedSec, pollCount, commentDelta, int(opts.Interval.Seconds()), maxViewersSeen, sessionID)
 
 		return true
 	}

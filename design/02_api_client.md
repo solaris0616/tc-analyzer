@@ -2,8 +2,7 @@
 
 ## 1. 概要
 
-Python 版 `api.py` に相当する TwitCasting API v2 クライアント。
-Basic 認証（ClientID:ClientSecret の Base64 エンコード）を使用する。
+TwitCasting API v2 クライアント。Basic認証（ClientID:ClientSecretのBase64エンコード）を使用する。
 
 ---
 
@@ -13,6 +12,7 @@ Basic 認証（ClientID:ClientSecret の Base64 エンコード）を使用す�
 |---|---|---|
 | `GET /users/{user_id}` | `GetUser` | ユーザー情報の取得（存在確認用） |
 | `GET /movies/{movie_id}` | `GetMovieInfo` | 配信情報取得（ライブ・録画共通） |
+| `GET /movies/{movie_id}/comments` | `GetComments` | コメント取得（`slice_id`による差分取得に対応） |
 | `GET /users/{user_id}/current_live` | `GetCurrentLive` | ユーザーの現在のライブ情報取得 |
 | `GET /verify_credentials` | `VerifyCredentials` | 認証情報の検証 |
 
@@ -26,7 +26,7 @@ Basic 認証（ClientID:ClientSecret の Base64 エンコード）を使用す�
 
 ### MovieSnapshot
 
-Python 版 `MovieSnapshot` dataclass に相当する。
+配信情報をある時点のスナップショットとして表す。
 
 ```go
 package api
@@ -44,8 +44,28 @@ type MovieSnapshot struct {
     TotalViewCount       int     `json:"total_view_count"`
     Duration             int     `json:"duration"`
     CreatedAt            int64   `json:"created"`        // UNIX timestamp
-    BroadcasterScreenID  string  // broadcaster.screen_id
-    BroadcasterName      string  // broadcaster.name
+    BroadcasterID        string  `json:"broadcaster_id"`
+    BroadcasterScreenID  string  `json:"broadcaster_screen_id"`
+    BroadcasterName      string  `json:"broadcaster_name"`
+}
+```
+
+### Comment / GetCommentsResponse
+
+```go
+// Comment は配信へ投稿された1件のコメント
+type Comment struct {
+    ID       string   `json:"id"`
+    Message  string   `json:"message"`
+    FromUser UserInfo `json:"from_user"`
+    Created  int64    `json:"created"`
+}
+
+// GetCommentsResponse はコメント取得APIのレスポンス
+type GetCommentsResponse struct {
+    MovieID  string    `json:"movie_id"`
+    AllCount int       `json:"all_count"`
+    Comments []Comment `json:"comments"`
 }
 ```
 
@@ -115,6 +135,11 @@ func (c *Client) GetMovieInfo(ctx context.Context, movieID string) (*MovieSnapsh
 // GetCurrentLive は GET /users/{user_id}/current_live を呼び出す
 // 配信中でない場合は (nil, nil) を返す（404 は正常系として扱う）
 func (c *Client) GetCurrentLive(ctx context.Context, userID string) (*MovieSnapshot, error)
+
+// GetComments は GET /movies/{movie_id}/comments を呼び出す
+// sliceIDが空でなければ、そのコメントIDより新しいコメントを取得する
+// limitは1〜50の範囲外なら50として扱う
+func (c *Client) GetComments(ctx context.Context, movieID, sliceID string, limit int) (*GetCommentsResponse, error)
 
 // VerifyCredentials は GET /verify_credentials を呼び出す
 func (c *Client) VerifyCredentials(ctx context.Context) (*VerifyCredentialsResponse, error)
@@ -257,14 +282,23 @@ func (c *Client) GetCurrentLive(ctx context.Context, userID string) (*MovieSnaps
 
 同じ構造。配信中でない場合は HTTP 404 が返る。
 
----
+### GET /movies/{movie_id}/comments
 
-## 8. Python 版との差分
-
-| 項目 | Python 版 | Go 版 |
-|---|---|---|
-| 非同期 | `async/await` | 同期 (`context.Context` でキャンセル対応) |
-| HTTP クライアント | `httpx.AsyncClient` | `net/http.Client` |
-| 接続管理 | `async with` コンテキストマネージャ | `Client` 構造体を使い回す（`http.Client` は再利用可能） |
-| Optional | `Optional[MovieSnapshot]` | `*MovieSnapshot` (nil pointer) |
-| subtitle | `Optional[str]` | `string` (空文字 = 未設定) |
+```json
+{
+  "movie_id": "189037369",
+  "all_count": 1234,
+  "comments": [
+    {
+      "id": "987654321",
+      "message": "コメント本文",
+      "from_user": {
+        "id": "1234567",
+        "screen_id": "viewer_id",
+        "name": "視聴者名"
+      },
+      "created": 1700000000
+    }
+  ]
+}
+```

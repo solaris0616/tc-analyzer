@@ -9,11 +9,15 @@ run = "go mod download"
 
 [tasks.fmt]
 description = "Go ソースコードをフォーマット"
-run = "go fmt ./..."
+run = "go run ./.codex/tools/project-harness fmt"
 
 [tasks.test]
 description = "すべての Go テストを実行"
 run = "go test ./..."
+
+[tasks.test-uncached]
+description = "Goテストをキャッシュなしで実行"
+run = "go test -count=1 ./..."
 
 [tasks.vet]
 description = "go vet で静的解析を実行"
@@ -26,6 +30,18 @@ depends = ["test", "vet"]
 [tasks.build]
 description = "tc-analyzer をビルド"
 run = "go build ./cmd/tc-analyzer"
+
+[tasks.docs-check]
+description = "設計資料とエージェント定義の用語を検査"
+run = "go run ./.codex/tools/project-harness docs-check"
+
+[tasks.agent-check]
+description = "AGENTS.md・エージェント・スキル定義を検査"
+run = "go run ./.codex/tools/definition-check"
+
+[tasks.verify]
+description = "フォーマット・テスト・静的解析・ビルド・資料を一括検証"
+run = "go run ./.codex/tools/project-harness verify"
 
 [tasks.tc]
 description = "tc-analyzer CLI をソースから実行"

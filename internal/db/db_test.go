@@ -20,7 +20,7 @@ func TestDBOperations(t *testing.T) {
 	defer database.Close()
 
 	// Test CreateSession
-	sessionID, err := database.CreateSessionWithBroadcaster("movie_100", 10, "Test Session", Broadcaster{ID: "user_1", ScreenID: "streamer", Name: "Streamer"})
+	sessionID, err := database.CreateSessionWithBroadcaster("movie_100", "Test Session", Broadcaster{ID: "user_1", ScreenID: "streamer", Name: "Streamer"})
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestDBOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSession failed: %v", err)
 	}
-	if sess.MovieID != "movie_100" || sess.Label != "Test Session" || sess.IntervalSec != 10 {
+	if sess.MovieID != "movie_100" || sess.Label != "Test Session" {
 		t.Errorf("unexpected session data: %+v", sess)
 	}
 
@@ -49,7 +49,7 @@ func TestDBOperations(t *testing.T) {
 		Duration:         300,
 	}
 
-	snapID1, err := database.AddSnapshot(sessionID, snap1, 0, 10)
+	snapID1, err := database.AddSnapshot(sessionID, snap1)
 	if err != nil {
 		t.Fatalf("AddSnapshot 1 failed: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestDBOperations(t *testing.T) {
 		Duration:         310,
 	}
 
-	_, err = database.AddSnapshot(sessionID, snap2, 10, 5)
+	_, err = database.AddSnapshot(sessionID, snap2)
 	if err != nil {
 		t.Fatalf("AddSnapshot 2 failed: %v", err)
 	}
@@ -102,8 +102,8 @@ func TestDBOperations(t *testing.T) {
 	if summary.AvgViewers != 25.0 {
 		t.Errorf("expected 25.0 avg viewers, got %f", summary.AvgViewers)
 	}
-	if summary.TotalCommentsObserved != 15 {
-		t.Errorf("expected 15 total comments observed, got %d", summary.TotalCommentsObserved)
+	if summary.TotalCommentsObserved != 5 {
+		t.Errorf("expected 5 total comments observed, got %d", summary.TotalCommentsObserved)
 	}
 
 	// Test ListMovies
@@ -125,6 +125,106 @@ func TestDBOperations(t *testing.T) {
 	}
 }
 
+func TestNewSchemaOmitsDerivedCollectionColumns(t *testing.T) {
+	database, err := New(filepath.Join(t.TempDir(), "schema.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	for table, removed := range map[string][]string{
+		"sessions":  {"interval_sec"},
+		"snapshots": {"elapsed_sec", "is_live", "comment_delta"},
+	} {
+		rows, err := database.db.Query("PRAGMA table_info(" + table + ")")
+		if err != nil {
+			t.Fatal(err)
+		}
+		columns := make(map[string]bool)
+		for rows.Next() {
+			var cid, notNull, pk int
+			var name, columnType string
+			var defaultValue sql.NullString
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			columns[name] = true
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		for _, column := range removed {
+			if columns[column] {
+				t.Errorf("%s.%s should not exist", table, column)
+			}
+		}
+	}
+}
+
+func TestAddSnapshotRejectsOfflineData(t *testing.T) {
+	database, err := New(filepath.Join(t.TempDir(), "offline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	sessionID, err := database.CreateSession("movie_1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.AddSnapshot(sessionID, &api.MovieSnapshot{IsLive: false}); err == nil {
+		t.Fatal("expected offline snapshot to be rejected")
+	}
+}
+
+func TestMovieSummaryDerivesCommentDeltasPerSession(t *testing.T) {
+	database, err := New(filepath.Join(t.TempDir(), "comment-deltas.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	addComments := func(sessionID int64, counts ...int) {
+		t.Helper()
+		for _, count := range counts {
+			if _, err := database.AddSnapshot(sessionID, &api.MovieSnapshot{
+				IsLive:       true,
+				CommentCount: count,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	firstSession, err := database.CreateSession("movie_1", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addComments(firstSession, 10, 15)
+
+	secondSession, err := database.CreateSession("movie_1", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addComments(secondSession, 100, 90, 95)
+	secondSummary, err := database.GetSessionSummary(secondSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondSummary.TotalCommentsObserved != 5 {
+		t.Fatalf("expected positive deltas totaling 5 after a counter decrease, got %d", secondSummary.TotalCommentsObserved)
+	}
+
+	summary, err := database.GetMovieSummary("movie_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TotalCommentsObserved != 10 {
+		t.Fatalf("expected per-session positive deltas totaling 10, got %d", summary.TotalCommentsObserved)
+	}
+}
+
 func TestBroadcasterFiltering(t *testing.T) {
 	database, err := New(filepath.Join(t.TempDir(), "broadcasters.db"))
 	if err != nil {
@@ -132,18 +232,18 @@ func TestBroadcasterFiltering(t *testing.T) {
 	}
 	defer database.Close()
 
-	firstID, err := database.CreateSessionWithBroadcaster("movie_a", 10, "", Broadcaster{ID: "owner_a", ScreenID: "alice", Name: "Alice"})
+	firstID, err := database.CreateSessionWithBroadcaster("movie_a", "", Broadcaster{ID: "owner_a", ScreenID: "alice", Name: "Alice"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondID, err := database.CreateSessionWithBroadcaster("movie_b", 10, "", Broadcaster{ID: "owner_b", ScreenID: "bob", Name: "Bob"})
+	secondID, err := database.CreateSessionWithBroadcaster("movie_b", "", Broadcaster{ID: "owner_b", ScreenID: "bob", Name: "Bob"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.AddSnapshot(firstID, &api.MovieSnapshot{IsLive: true, CurrentViewCount: 100}, 0, 0); err != nil {
+	if _, err := database.AddSnapshot(firstID, &api.MovieSnapshot{IsLive: true, CurrentViewCount: 100}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.AddSnapshot(secondID, &api.MovieSnapshot{IsLive: true, CurrentViewCount: 1000}, 0, 0); err != nil {
+	if _, err := database.AddSnapshot(secondID, &api.MovieSnapshot{IsLive: true, CurrentViewCount: 1000}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -179,7 +279,7 @@ func TestBackfillBroadcasterForMovie(t *testing.T) {
 	}
 	defer database.Close()
 
-	if _, err := database.CreateSession("movie_old", 10, ""); err != nil {
+	if _, err := database.CreateSession("movie_old", ""); err != nil {
 		t.Fatal(err)
 	}
 	ids, err := database.ListUnattributedMovieIDs()
@@ -193,44 +293,6 @@ func TestBackfillBroadcasterForMovie(t *testing.T) {
 	updated, err = database.BackfillBroadcasterForMovie("movie_old", Broadcaster{ID: "owner", ScreenID: "screen", Name: "Name"})
 	if err != nil || updated != 0 {
 		t.Fatalf("backfill was not idempotent: updated=%d err=%v", updated, err)
-	}
-}
-
-func TestNewMigratesLegacySessionsTable(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "legacy.db")
-	legacy, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = legacy.Exec(`
-CREATE TABLE sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    movie_id TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    label TEXT,
-    interval_sec INTEGER NOT NULL DEFAULT 10
-);
-INSERT INTO sessions (movie_id, started_at, interval_sec)
-VALUES ('legacy_movie', '2026-08-19T00:00:00Z', 10);
-`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := legacy.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	database, err := New(dbPath)
-	if err != nil {
-		t.Fatalf("legacy migration failed: %v", err)
-	}
-	defer database.Close()
-	sessions, err := database.ListSessions("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sessions) != 1 || sessions[0].MovieID != "legacy_movie" || sessions[0].BroadcasterID != "" {
-		t.Fatalf("legacy data was not preserved: %+v", sessions)
 	}
 }
 
@@ -274,25 +336,25 @@ func TestListMoviesUsesLatestSessionMetadata(t *testing.T) {
 	}
 	defer database.Close()
 
-	firstID, err := database.CreateSession("movie_1", 10, "old label")
+	firstID, err := database.CreateSession("movie_1", "old label")
 	if err != nil {
 		t.Fatalf("CreateSession first failed: %v", err)
 	}
 	if err := database.UpdateSessionTitle(firstID, "old title"); err != nil {
 		t.Fatalf("UpdateSessionTitle first failed: %v", err)
 	}
-	if _, err := database.AddSnapshot(firstID, &api.MovieSnapshot{IsLive: true}, 0, 0); err != nil {
+	if _, err := database.AddSnapshot(firstID, &api.MovieSnapshot{IsLive: true}); err != nil {
 		t.Fatalf("AddSnapshot first failed: %v", err)
 	}
 
-	latestID, err := database.CreateSession("movie_1", 30, "latest label")
+	latestID, err := database.CreateSession("movie_1", "latest label")
 	if err != nil {
 		t.Fatalf("CreateSession latest failed: %v", err)
 	}
 	if err := database.UpdateSessionTitle(latestID, "latest title"); err != nil {
 		t.Fatalf("UpdateSessionTitle latest failed: %v", err)
 	}
-	if _, err := database.AddSnapshot(latestID, &api.MovieSnapshot{IsLive: true}, 0, 0); err != nil {
+	if _, err := database.AddSnapshot(latestID, &api.MovieSnapshot{IsLive: true}); err != nil {
 		t.Fatalf("AddSnapshot latest failed: %v", err)
 	}
 
@@ -304,7 +366,7 @@ func TestListMoviesUsesLatestSessionMetadata(t *testing.T) {
 		t.Fatalf("expected one grouped movie, got %d", len(movies))
 	}
 	got := movies[0]
-	if got.Label != "latest label" || got.Title != "latest title" || got.IntervalSec != 30 || got.TotalRecords != 2 {
+	if got.Label != "latest label" || got.Title != "latest title" || got.TotalRecords != 2 {
 		t.Fatalf("ListMovies did not use latest metadata and aggregate records: %+v", got)
 	}
 }

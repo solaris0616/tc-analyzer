@@ -315,7 +315,6 @@ async function loadMovieDetail(movieID, isSilent = false, generation = refreshGe
         const subtitleEl = document.getElementById('selected-subtitle');
         const metaIdEl = document.querySelector('#meta-movie-id span');
         const metaDateEl = document.querySelector('#meta-date span');
-        const metaIntervalEl = document.querySelector('#meta-interval span');
 
         const movieTitle = data.movie && data.movie.title ? data.movie.title : `Movie #${movieID}`;
         if (titleEl) {
@@ -336,11 +335,6 @@ async function loadMovieDetail(movieID, isSilent = false, generation = refreshGe
         if (metaDateEl) {
             const startedAt = data.movie ? data.movie.started_at : (data.summary ? data.summary.first_record : null);
             metaDateEl.textContent = `開始: ${formatFullDateTime(startedAt)}`;
-        }
-
-        if (metaIntervalEl) {
-            const interval = data.movie && data.movie.interval_sec ? data.movie.interval_sec : 10;
-            metaIntervalEl.textContent = `間隔: ${interval}秒`;
         }
 
         if (data.summary) {

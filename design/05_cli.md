@@ -2,8 +2,8 @@
 
 ## 1. 概要
 
-Python 版 `cli.py` (Typer 使用) に相当する CLI インタフェースの実装。
-Go 版では、デファクトスタンダードである `github.com/spf13/cobra` パッケージを使用して、コマンドツリーの構築、フラグの解析、ヘルプメッセージの出力、および OS シグナルのハンドリングを行う。
+`github.com/spf13/cobra`を使用したCLIインターフェース。
+`github.com/spf13/cobra`パッケージを使用して、コマンドツリーの構築、フラグの解析、ヘルプメッセージの出力、およびOSシグナルのハンドリングを行う。
 
 ---
 
@@ -217,14 +217,3 @@ func NewWatchCmd() *cobra.Command {
 - **`config show`**:
   - フラグ: `--verify`: 指定された場合、ロードした認証情報を使い、実際に `VerifyCredentials` API を叩いて疏通確認まで実行する。
   - 現在の設定を出力。`client_secret` はマスキング（例: `abcd****wxyz`）する。
-
----
-
-## 5. Python 版との比較・設計差分
-
-| 調査項目 | Python 版 (Typer) | Go 版 (Cobra) |
-|---|---|---|
-| コマンド定義方式 | デコレータベース (`@app.command()`) | 明示的なツリー構造構築 (`AddCommand`) |
-| パラメータ検証 | アノテーションによる定義 | `cobra.ExactArgs()`, `cobra.RangeArgs()` 等の検証関数 |
-| パス解決 | `pathlib.Path` オブジェクトへの自動キャスト | `string` 型としてパースした後に個別に検証 |
-| 例外処理終了 | `typer.Exit(code)` | `RunE` から `error` を返し、`os.Exit` を制御 |

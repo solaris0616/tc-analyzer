@@ -18,7 +18,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     movie_id     TEXT    NOT NULL,
     started_at   TEXT    NOT NULL,
     label        TEXT,
-    interval_sec INTEGER NOT NULL DEFAULT 10,
     title        TEXT,
     broadcaster_id        TEXT,
     broadcaster_screen_id TEXT,
@@ -29,13 +28,10 @@ CREATE TABLE IF NOT EXISTS snapshots (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id          INTEGER NOT NULL REFERENCES sessions(id),
     recorded_at         TEXT    NOT NULL,
-    elapsed_sec         INTEGER NOT NULL,
-    is_live             INTEGER NOT NULL,
     current_view_count  INTEGER NOT NULL,
     max_view_count      INTEGER NOT NULL,
     total_view_count    INTEGER NOT NULL,
     comment_count       INTEGER NOT NULL,
-    comment_delta       INTEGER NOT NULL,
     duration            INTEGER NOT NULL
 );
 
@@ -75,7 +71,6 @@ type Session struct {
 	MovieID             string    `json:"movie_id"`
 	StartedAt           time.Time `json:"started_at"`
 	Label               string    `json:"label"`
-	IntervalSec         int       `json:"interval_sec"`
 	Title               string    `json:"title"`
 	BroadcasterID       string    `json:"broadcaster_id"`
 	BroadcasterScreenID string    `json:"broadcaster_screen_id"`
@@ -87,13 +82,10 @@ type Snapshot struct {
 	ID                   int64     `json:"id"`
 	SessionID            int64     `json:"session_id"`
 	RecordedAt           time.Time `json:"recorded_at"`
-	ElapsedSec           int       `json:"elapsed_sec"`
-	IsLive               bool      `json:"is_live"`
 	CurrentViewCount     int       `json:"current_view_count"`
 	MaxViewCount         int       `json:"max_view_count"`
 	TotalViewCount       int       `json:"total_view_count"`
 	CommentCount         int       `json:"comment_count"`
-	CommentDelta         int       `json:"comment_delta"`
 	Duration             int       `json:"duration"`
 	CumulativeCommenters int       `json:"cumulative_commenters"`
 }
@@ -117,7 +109,6 @@ type MovieListRow struct {
 	MovieID      string    `json:"movie_id"`
 	StartedAt    time.Time `json:"started_at"`
 	Label        string    `json:"label"`
-	IntervalSec  int       `json:"interval_sec"`
 	TotalRecords int       `json:"total_records"`
 	Title        string    `json:"title"`
 }
@@ -206,60 +197,12 @@ func New(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to execute schema SQL: %w", err)
 	}
 
-	if err := migrateSessionColumns(sqlDB); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("failed to migrate sessions table: %w", err)
-	}
 	if _, err := sqlDB.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_broadcaster ON sessions(broadcaster_id, movie_id, started_at)`); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("failed to create broadcaster index: %w", err)
 	}
 
 	return &DB{path: dbPath, db: sqlDB}, nil
-}
-
-func migrateSessionColumns(sqlDB *sql.DB) error {
-	rows, err := sqlDB.Query(`PRAGMA table_info(sessions)`)
-	if err != nil {
-		return err
-	}
-	columns := make(map[string]bool)
-	for rows.Next() {
-		var cid, notNull, pk int
-		var name, columnType string
-		var defaultValue sql.NullString
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			rows.Close()
-			return err
-		}
-		columns[name] = true
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-
-	definitions := []struct {
-		name string
-		sql  string
-	}{
-		{"title", "ALTER TABLE sessions ADD COLUMN title TEXT"},
-		{"broadcaster_id", "ALTER TABLE sessions ADD COLUMN broadcaster_id TEXT"},
-		{"broadcaster_screen_id", "ALTER TABLE sessions ADD COLUMN broadcaster_screen_id TEXT"},
-		{"broadcaster_name", "ALTER TABLE sessions ADD COLUMN broadcaster_name TEXT"},
-	}
-	tx, err := sqlDB.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, definition := range definitions {
-		if !columns[definition.name] {
-			if _, err := tx.Exec(definition.sql); err != nil {
-				return err
-			}
-		}
-	}
-	return tx.Commit()
 }
 
 // Close closes the underlying database connection.
@@ -271,12 +214,12 @@ func (d *DB) Close() error {
 }
 
 // CreateSession inserts a new monitoring session.
-func (d *DB) CreateSession(movieID string, intervalSec int, label string) (int64, error) {
-	return d.CreateSessionWithBroadcaster(movieID, intervalSec, label, Broadcaster{})
+func (d *DB) CreateSession(movieID string, label string) (int64, error) {
+	return d.CreateSessionWithBroadcaster(movieID, label, Broadcaster{})
 }
 
 // CreateSessionWithBroadcaster inserts a monitoring session with its owner.
-func (d *DB) CreateSessionWithBroadcaster(movieID string, intervalSec int, label string, broadcaster Broadcaster) (int64, error) {
+func (d *DB) CreateSessionWithBroadcaster(movieID string, label string, broadcaster Broadcaster) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	var labelNull sql.NullString
 	if label != "" {
@@ -285,9 +228,9 @@ func (d *DB) CreateSessionWithBroadcaster(movieID string, intervalSec int, label
 
 	res, err := d.db.Exec(
 		`INSERT INTO sessions
-         (movie_id, started_at, label, interval_sec, broadcaster_id, broadcaster_screen_id, broadcaster_name)
-         VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))`,
-		movieID, now, labelNull, intervalSec, broadcaster.ID, broadcaster.ScreenID, broadcaster.Name,
+         (movie_id, started_at, label, broadcaster_id, broadcaster_screen_id, broadcaster_name)
+         VALUES (?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))`,
+		movieID, now, labelNull, broadcaster.ID, broadcaster.ScreenID, broadcaster.Name,
 	)
 	if err != nil {
 		return 0, err
@@ -306,7 +249,7 @@ func (d *DB) UpdateSessionTitle(sessionID int64, title string) error {
 
 // GetSession retrieves a session by ID.
 func (d *DB) GetSession(sessionID int64) (*Session, error) {
-	row := d.db.QueryRow("SELECT id, movie_id, started_at, label, interval_sec, COALESCE(title, ''), COALESCE(broadcaster_id, ''), COALESCE(broadcaster_screen_id, ''), COALESCE(broadcaster_name, '') FROM sessions WHERE id = ?", sessionID)
+	row := d.db.QueryRow("SELECT id, movie_id, started_at, label, COALESCE(title, ''), COALESCE(broadcaster_id, ''), COALESCE(broadcaster_screen_id, ''), COALESCE(broadcaster_name, '') FROM sessions WHERE id = ?", sessionID)
 	return scanSession(row)
 }
 
@@ -315,9 +258,9 @@ func (d *DB) ListSessions(movieID string) ([]*Session, error) {
 	var rows *sql.Rows
 	var err error
 	if movieID != "" {
-		rows, err = d.db.Query("SELECT id, movie_id, started_at, label, interval_sec, COALESCE(title, ''), COALESCE(broadcaster_id, ''), COALESCE(broadcaster_screen_id, ''), COALESCE(broadcaster_name, '') FROM sessions WHERE movie_id = ? ORDER BY id DESC", movieID)
+		rows, err = d.db.Query("SELECT id, movie_id, started_at, label, COALESCE(title, ''), COALESCE(broadcaster_id, ''), COALESCE(broadcaster_screen_id, ''), COALESCE(broadcaster_name, '') FROM sessions WHERE movie_id = ? ORDER BY id DESC", movieID)
 	} else {
-		rows, err = d.db.Query("SELECT id, movie_id, started_at, label, interval_sec, COALESCE(title, ''), COALESCE(broadcaster_id, ''), COALESCE(broadcaster_screen_id, ''), COALESCE(broadcaster_name, '') FROM sessions ORDER BY id DESC")
+		rows, err = d.db.Query("SELECT id, movie_id, started_at, label, COALESCE(title, ''), COALESCE(broadcaster_id, ''), COALESCE(broadcaster_screen_id, ''), COALESCE(broadcaster_name, '') FROM sessions ORDER BY id DESC")
 	}
 	if err != nil {
 		return nil, err
@@ -337,7 +280,7 @@ func (d *DB) ListSessions(movieID string) ([]*Session, error) {
 
 // GetLatestSessionByMovie returns the newest session for a movie ID.
 func (d *DB) GetLatestSessionByMovie(movieID string) (*Session, error) {
-	row := d.db.QueryRow("SELECT id, movie_id, started_at, label, interval_sec, COALESCE(title, ''), COALESCE(broadcaster_id, ''), COALESCE(broadcaster_screen_id, ''), COALESCE(broadcaster_name, '') FROM sessions WHERE movie_id = ? ORDER BY id DESC LIMIT 1", movieID)
+	row := d.db.QueryRow("SELECT id, movie_id, started_at, label, COALESCE(title, ''), COALESCE(broadcaster_id, ''), COALESCE(broadcaster_screen_id, ''), COALESCE(broadcaster_name, '') FROM sessions WHERE movie_id = ? ORDER BY id DESC LIMIT 1", movieID)
 	return scanSession(row)
 }
 
@@ -365,7 +308,6 @@ SELECT
     latest.movie_id,
     totals.started_at,
     COALESCE(latest.label, ''),
-    latest.interval_sec,
     totals.total_records,
     COALESCE(latest.title, '')
 FROM latest_sessions latest
@@ -384,7 +326,7 @@ ORDER BY latest.id DESC
 		var startedAtStr string
 		var labelNull sql.NullString
 		var titleNull sql.NullString
-		if err := rows.Scan(&r.MovieID, &startedAtStr, &labelNull, &r.IntervalSec, &r.TotalRecords, &titleNull); err != nil {
+		if err := rows.Scan(&r.MovieID, &startedAtStr, &labelNull, &r.TotalRecords, &titleNull); err != nil {
 			return nil, err
 		}
 		if t, err := parseISO(startedAtStr); err == nil {
@@ -407,7 +349,7 @@ func scanMovieListRows(rows *sql.Rows) ([]*MovieListRow, error) {
 		var item MovieListRow
 		var startedAtStr string
 		var labelNull, titleNull sql.NullString
-		if err := rows.Scan(&item.MovieID, &startedAtStr, &labelNull, &item.IntervalSec, &item.TotalRecords, &titleNull); err != nil {
+		if err := rows.Scan(&item.MovieID, &startedAtStr, &labelNull, &item.TotalRecords, &titleNull); err != nil {
 			return nil, err
 		}
 		if parsed, err := parseISO(startedAtStr); err == nil {
@@ -450,7 +392,6 @@ SELECT
     latest.movie_id,
     totals.started_at,
     COALESCE(latest.label, ''),
-    latest.interval_sec,
     totals.total_records,
     COALESCE(latest.title, '')
 FROM latest_sessions latest
@@ -549,25 +490,24 @@ WHERE movie_id = ? AND (broadcaster_id IS NULL OR broadcaster_id = '')
 	return res.RowsAffected()
 }
 
-// AddSnapshot inserts a snapshot into the database.
-func (d *DB) AddSnapshot(sessionID int64, snap *api.MovieSnapshot, elapsedSec int, commentDelta int) (int64, error) {
-	now := time.Now().UTC().Format(time.RFC3339)
-	isLiveInt := 0
-	if snap.IsLive {
-		isLiveInt = 1
+// AddSnapshot inserts a live snapshot into the database.
+func (d *DB) AddSnapshot(sessionID int64, snap *api.MovieSnapshot) (int64, error) {
+	if !snap.IsLive {
+		return 0, fmt.Errorf("offline snapshots cannot be stored")
 	}
+	now := time.Now().UTC().Format(time.RFC3339)
 
 	query := `
 INSERT INTO snapshots (
-    session_id, recorded_at, elapsed_sec, is_live,
+    session_id, recorded_at,
     current_view_count, max_view_count, total_view_count,
-    comment_count, comment_delta, duration
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    comment_count, duration
+) VALUES (?, ?, ?, ?, ?, ?, ?)
 `
 	res, err := d.db.Exec(query,
-		sessionID, now, elapsedSec, isLiveInt,
+		sessionID, now,
 		snap.CurrentViewCount, snap.MaxViewCount, snap.TotalViewCount,
-		snap.CommentCount, commentDelta, snap.Duration,
+		snap.CommentCount, snap.Duration,
 	)
 	if err != nil {
 		return 0, err
@@ -578,9 +518,9 @@ INSERT INTO snapshots (
 // GetSnapshots returns all snapshots for a given sessionID.
 func (d *DB) GetSnapshots(sessionID int64) ([]*Snapshot, error) {
 	query := `
-SELECT id, session_id, recorded_at, elapsed_sec, is_live,
+SELECT id, session_id, recorded_at,
        current_view_count, max_view_count, total_view_count,
-       comment_count, comment_delta, duration
+       comment_count, duration
 FROM snapshots
 WHERE session_id = ?
 ORDER BY recorded_at ASC
@@ -597,9 +537,9 @@ ORDER BY recorded_at ASC
 // GetLatestSnapshot returns the newest snapshot for a session.
 func (d *DB) GetLatestSnapshot(sessionID int64) (*Snapshot, error) {
 	query := `
-SELECT id, session_id, recorded_at, elapsed_sec, is_live,
+SELECT id, session_id, recorded_at,
        current_view_count, max_view_count, total_view_count,
-       comment_count, comment_delta, duration
+       comment_count, duration
 FROM snapshots
 WHERE session_id = ?
 ORDER BY id DESC LIMIT 1
@@ -608,15 +548,15 @@ ORDER BY id DESC LIMIT 1
 	return scanSnapshot(row)
 }
 
-// GetMovieSnapshots returns all snapshots for a movie_id where is_live = 1.
+// GetMovieSnapshots returns all snapshots for a movie_id.
 func (d *DB) GetMovieSnapshots(movieID string) ([]*Snapshot, error) {
 	query := `
-SELECT sn.id, sn.session_id, sn.recorded_at, sn.elapsed_sec, sn.is_live,
+SELECT sn.id, sn.session_id, sn.recorded_at,
        sn.current_view_count, sn.max_view_count, sn.total_view_count,
-       sn.comment_count, sn.comment_delta, sn.duration
+       sn.comment_count, sn.duration
 FROM snapshots sn
 JOIN sessions s ON sn.session_id = s.id
-WHERE s.movie_id = ? AND sn.is_live = 1
+WHERE s.movie_id = ?
 ORDER BY sn.recorded_at ASC
 `
 	rows, err := d.db.Query(query, movieID)
@@ -631,6 +571,12 @@ ORDER BY sn.recorded_at ASC
 // GetSessionSummary calculates statistical summary for a session.
 func (d *DB) GetSessionSummary(sessionID int64) (*SessionSummary, error) {
 	query := `
+WITH ordered AS (
+    SELECT snapshots.*,
+           LAG(comment_count) OVER (ORDER BY recorded_at, id) AS previous_comment_count
+    FROM snapshots
+    WHERE session_id = ?
+)
 SELECT
     COUNT(*),
     COALESCE(MIN(current_view_count), 0),
@@ -639,11 +585,14 @@ SELECT
     COALESCE(MAX(max_view_count), 0),
     COALESCE(MAX(total_view_count), 0),
     COALESCE(MAX(comment_count), 0),
-    COALESCE(SUM(comment_delta), 0),
+    COALESCE(SUM(CASE
+        WHEN previous_comment_count IS NOT NULL AND comment_count > previous_comment_count
+        THEN comment_count - previous_comment_count
+        ELSE 0
+    END), 0),
     COALESCE(MIN(recorded_at), ''),
     COALESCE(MAX(recorded_at), '')
-FROM snapshots
-WHERE session_id = ? AND is_live = 1
+FROM ordered
 `
 	row := d.db.QueryRow(query, sessionID)
 	return scanSummary(row)
@@ -652,6 +601,13 @@ WHERE session_id = ? AND is_live = 1
 // GetMovieSummary calculates overall statistical summary for a movie_id across all live snapshots.
 func (d *DB) GetMovieSummary(movieID string) (*SessionSummary, error) {
 	query := `
+WITH ordered AS (
+    SELECT sn.*,
+           LAG(sn.comment_count) OVER (PARTITION BY sn.session_id ORDER BY sn.recorded_at, sn.id) AS previous_comment_count
+    FROM snapshots sn
+    JOIN sessions s ON sn.session_id = s.id
+    WHERE s.movie_id = ?
+)
 SELECT
     COUNT(*),
     COALESCE(MIN(current_view_count), 0),
@@ -666,12 +622,14 @@ SELECT
         MAX(total_view_count)
     ), 0),
     COALESCE(MAX(comment_count), 0),
-    COALESCE(SUM(comment_delta), 0),
+    COALESCE(SUM(CASE
+        WHEN previous_comment_count IS NOT NULL AND comment_count > previous_comment_count
+        THEN comment_count - previous_comment_count
+        ELSE 0
+    END), 0),
     COALESCE(MIN(recorded_at), ''),
     COALESCE(MAX(recorded_at), '')
-FROM snapshots sn
-JOIN sessions s ON sn.session_id = s.id
-WHERE s.movie_id = ? AND sn.is_live = 1
+FROM ordered
 `
 	row := d.db.QueryRow(query, movieID, movieID, movieID)
 	return scanSummary(row)
@@ -692,7 +650,7 @@ SELECT
     COUNT(*) AS data_points
 FROM snapshots sn
 JOIN sessions s ON s.id = sn.session_id
-WHERE sn.is_live = 1 AND s.broadcaster_id = ?
+WHERE s.broadcaster_id = ?
 GROUP BY day_of_week, hour_of_day, minute_of_hour
 ORDER BY day_of_week, hour_of_day, minute_of_hour;
 `
@@ -720,7 +678,7 @@ func scanSession(row *sql.Row) (*Session, error) {
 	var startedAtStr string
 	var labelNull sql.NullString
 	var titleNull sql.NullString
-	if err := row.Scan(&s.ID, &s.MovieID, &startedAtStr, &labelNull, &s.IntervalSec, &titleNull, &s.BroadcasterID, &s.BroadcasterScreenID, &s.BroadcasterName); err != nil {
+	if err := row.Scan(&s.ID, &s.MovieID, &startedAtStr, &labelNull, &titleNull, &s.BroadcasterID, &s.BroadcasterScreenID, &s.BroadcasterName); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -743,7 +701,7 @@ func scanSessionRows(rows *sql.Rows) (*Session, error) {
 	var startedAtStr string
 	var labelNull sql.NullString
 	var titleNull sql.NullString
-	if err := rows.Scan(&s.ID, &s.MovieID, &startedAtStr, &labelNull, &s.IntervalSec, &titleNull, &s.BroadcasterID, &s.BroadcasterScreenID, &s.BroadcasterName); err != nil {
+	if err := rows.Scan(&s.ID, &s.MovieID, &startedAtStr, &labelNull, &titleNull, &s.BroadcasterID, &s.BroadcasterScreenID, &s.BroadcasterName); err != nil {
 		return nil, err
 	}
 	if t, err := parseISO(startedAtStr); err == nil {
@@ -761,10 +719,9 @@ func scanSessionRows(rows *sql.Rows) (*Session, error) {
 func scanSnapshot(row *sql.Row) (*Snapshot, error) {
 	var sn Snapshot
 	var recordedAtStr string
-	var isLiveInt int
-	if err := row.Scan(&sn.ID, &sn.SessionID, &recordedAtStr, &sn.ElapsedSec, &isLiveInt,
+	if err := row.Scan(&sn.ID, &sn.SessionID, &recordedAtStr,
 		&sn.CurrentViewCount, &sn.MaxViewCount, &sn.TotalViewCount,
-		&sn.CommentCount, &sn.CommentDelta, &sn.Duration); err != nil {
+		&sn.CommentCount, &sn.Duration); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -773,7 +730,6 @@ func scanSnapshot(row *sql.Row) (*Snapshot, error) {
 	if t, err := parseISO(recordedAtStr); err == nil {
 		sn.RecordedAt = t
 	}
-	sn.IsLive = (isLiveInt == 1)
 	return &sn, nil
 }
 
@@ -782,16 +738,14 @@ func scanSnapshots(rows *sql.Rows) ([]*Snapshot, error) {
 	for rows.Next() {
 		var sn Snapshot
 		var recordedAtStr string
-		var isLiveInt int
-		if err := rows.Scan(&sn.ID, &sn.SessionID, &recordedAtStr, &sn.ElapsedSec, &isLiveInt,
+		if err := rows.Scan(&sn.ID, &sn.SessionID, &recordedAtStr,
 			&sn.CurrentViewCount, &sn.MaxViewCount, &sn.TotalViewCount,
-			&sn.CommentCount, &sn.CommentDelta, &sn.Duration); err != nil {
+			&sn.CommentCount, &sn.Duration); err != nil {
 			return nil, err
 		}
 		if t, err := parseISO(recordedAtStr); err == nil {
 			sn.RecordedAt = t
 		}
-		sn.IsLive = (isLiveInt == 1)
 		snapshots = append(snapshots, &sn)
 	}
 	return snapshots, rows.Err()

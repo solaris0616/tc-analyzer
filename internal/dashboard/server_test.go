@@ -22,7 +22,7 @@ func TestDashboardServer(t *testing.T) {
 	defer database.Close()
 
 	// Insert test data
-	sessionID, err := database.CreateSessionWithBroadcaster("movie_test", 10, "Dashboard Test", db.Broadcaster{ID: "user_100", ScreenID: "tester", Name: "Tester"})
+	sessionID, err := database.CreateSessionWithBroadcaster("movie_test", "Dashboard Test", db.Broadcaster{ID: "user_100", ScreenID: "tester", Name: "Tester"})
 	if err != nil {
 		t.Fatalf("failed to create session: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestDashboardServer(t *testing.T) {
 		TotalViewCount:   500,
 		Duration:         600,
 	}
-	if _, err := database.AddSnapshot(sessionID, snap, 0, 50); err != nil {
+	if _, err := database.AddSnapshot(sessionID, snap); err != nil {
 		t.Fatalf("failed to add snapshot: %v", err)
 	}
 

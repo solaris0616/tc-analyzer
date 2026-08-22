@@ -77,30 +77,23 @@ func exportCSV(path string, snapshots []*db.Snapshot) error {
 
 	// Header
 	header := []string{
-		"id", "session_id", "recorded_at", "elapsed_sec", "is_live",
+		"id", "session_id", "recorded_at",
 		"current_view_count", "max_view_count", "total_view_count",
-		"comment_count", "comment_delta", "duration",
+		"comment_count", "duration",
 	}
 	if err := w.Write(header); err != nil {
 		return err
 	}
 
 	for _, s := range snapshots {
-		isLiveStr := "0"
-		if s.IsLive {
-			isLiveStr = "1"
-		}
 		row := []string{
 			strconv.FormatInt(s.ID, 10),
 			strconv.FormatInt(s.SessionID, 10),
 			s.RecordedAt.Format(time.RFC3339),
-			strconv.Itoa(s.ElapsedSec),
-			isLiveStr,
 			strconv.Itoa(s.CurrentViewCount),
 			strconv.Itoa(s.MaxViewCount),
 			strconv.Itoa(s.TotalViewCount),
 			strconv.Itoa(s.CommentCount),
-			strconv.Itoa(s.CommentDelta),
 			strconv.Itoa(s.Duration),
 		}
 		if err := w.Write(row); err != nil {

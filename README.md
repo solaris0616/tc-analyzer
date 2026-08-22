@@ -66,7 +66,7 @@ Windows では `tc-analyzer.exe`、macOS/Linux では `tc-analyzer` がプロジ
 
 エージェント向けの索引と開発工程は[AGENTS.md](AGENTS.md)にあります。エージェント、スキル、工程別インストラクション、クロスプラットフォームな検証ツールは`.codex/`配下で管理します。
 
-検証ツールはGoで実装し、Windows、macOS、LinuxのCIで`mise run verify`を実行します。
+検証ツールはGoで実装し、CIではUbuntu上で`mise run verify`を実行します。
 
 ## クイックスタート
 

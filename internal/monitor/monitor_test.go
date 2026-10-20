@@ -120,6 +120,57 @@ func TestMonitorMovie(t *testing.T) {
 	}
 }
 
+func TestMonitorMovieCurrentLive404(t *testing.T) {
+	for _, wait := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wait=%t", wait), func(t *testing.T) {
+			var userCalls, movieCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/users/test_user":
+					call := userCalls.Add(1)
+					isLive := !wait || call >= 3
+					fmt.Fprintf(w, `{"user":{"id":"100","screen_id":"test_user","name":"Test User","is_live":%t,"last_movie_id":"movie_123"}}`, isLive)
+				case "/users/test_user/current_live":
+					w.WriteHeader(http.StatusNotFound)
+					fmt.Fprint(w, `{"error":{"code":404,"message":"Not Found"}}`)
+				case "/movies/movie_123":
+					isLive := movieCalls.Add(1) <= 2
+					fmt.Fprintf(w, `{"movie":{"id":"movie_123","title":"Live","is_live":%t,"comment_count":12,"current_view_count":50},"broadcaster":{"id":"100","screen_id":"test_user","name":"Test User"}}`, isLive)
+				default:
+					t.Errorf("unexpected request %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			client := api.NewClient("id", "secret", time.Second)
+			client.SetBaseURL(server.URL)
+			database, err := db.New(filepath.Join(t.TempDir(), "test.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			var out bytes.Buffer
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			sessionID, err := MonitorMovie(ctx, client, database, "test_user", MonitorOptions{
+				Interval: time.Millisecond, WaitInterval: time.Millisecond,
+				WaitOnConfig: wait, Writer: &out,
+			})
+			if err != nil || sessionID <= 0 {
+				t.Fatalf("monitor failed to start: session=%d err=%v", sessionID, err)
+			}
+			snaps, err := database.GetSnapshots(sessionID)
+			if err != nil || len(snaps) != 1 || snaps[0].CurrentViewCount != 50 {
+				t.Fatalf("expected one live snapshot: %+v, err=%v", snaps, err)
+			}
+			if movieCalls.Load() != 3 || !strings.Contains(out.String(), "自動終了") {
+				t.Fatalf("monitor did not end naturally: movieCalls=%d output=%s", movieCalls.Load(), out.String())
+			}
+		})
+	}
+}
+
 func TestMonitorMovieCancelsCommentPollingOnNaturalEnd(t *testing.T) {
 	moviePolls := 0
 	var commentPolls atomic.Int32

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -100,7 +101,11 @@ type movieResponseJSON struct {
 }
 
 type userResponseJSON struct {
-	User UserInfo `json:"user"`
+	User struct {
+		UserInfo
+		IsLive      bool   `json:"is_live"`
+		LastMovieID string `json:"last_movie_id"`
+	} `json:"user"`
 }
 
 // Client is a TwitCasting API v2 client.
@@ -163,7 +168,10 @@ func checkResponse(resp *http.Response) error {
 		return nil
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read API error response: %w", err)
+	}
 
 	var errBody struct {
 		Error struct {
@@ -186,6 +194,14 @@ func checkResponse(resp *http.Response) error {
 
 // GetUser calls GET /users/{user_id} and returns user info.
 func (c *Client) GetUser(ctx context.Context, userID string) (*UserInfo, error) {
+	data, err := c.getUserResponse(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return &data.User.UserInfo, nil
+}
+
+func (c *Client) getUserResponse(ctx context.Context, userID string) (*userResponseJSON, error) {
 	resp, err := c.do(ctx, http.MethodGet, "/users/"+userID)
 	if err != nil {
 		return nil, err
@@ -200,7 +216,7 @@ func (c *Client) GetUser(ctx context.Context, userID string) (*UserInfo, error) 
 		return nil, fmt.Errorf("failed to decode user response: %w", err)
 	}
 
-	return &data.User, nil
+	return &data, nil
 }
 
 // GetMovieInfo calls GET /movies/{movie_id} and returns details.
@@ -222,7 +238,8 @@ func (c *Client) GetMovieInfo(ctx context.Context, movieID string) (*MovieSnapsh
 	return parseMovieSnapshot(&data), nil
 }
 
-// GetCurrentLive calls GET /users/{user_id}/current_live. Returns (nil, nil) if not currently live (404).
+// GetCurrentLive returns the current live, checking user/movie info on a 404.
+// Returns (nil, nil) when the user is offline or the latest movie has ended.
 func (c *Client) GetCurrentLive(ctx context.Context, userID string) (*MovieSnapshot, error) {
 	resp, err := c.do(ctx, http.MethodGet, "/users/"+userID+"/current_live")
 	if err != nil {
@@ -230,7 +247,7 @@ func (c *Client) GetCurrentLive(ctx context.Context, userID string) (*MovieSnaps
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		resp.Body.Close()
-		return nil, nil
+		return c.getCurrentLiveFromUser(ctx, userID)
 	}
 	if err := checkResponse(resp); err != nil {
 		return nil, err
@@ -243,6 +260,39 @@ func (c *Client) GetCurrentLive(ctx context.Context, userID string) (*MovieSnaps
 	}
 
 	return parseMovieSnapshot(&data), nil
+}
+
+func (c *Client) getCurrentLiveFromUser(ctx context.Context, userID string) (*MovieSnapshot, error) {
+	data, err := c.getUserResponse(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to recheck user live status: %w", err)
+	}
+	user := data.User
+	if !user.IsLive {
+		return nil, nil
+	}
+	if user.ID == "" || user.LastMovieID == "" {
+		return nil, fmt.Errorf("live user response is missing user or latest movie ID")
+	}
+
+	movie, err := c.GetMovieInfo(ctx, user.LastMovieID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("failed to recheck latest movie: %w", ctx.Err())
+		}
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.HTTPStatus == http.StatusNotFound {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to recheck latest movie: %w", err)
+	}
+	if !movie.IsLive {
+		return nil, nil
+	}
+	if movie.MovieID != user.LastMovieID || movie.BroadcasterID != user.ID {
+		return nil, fmt.Errorf("latest live movie does not match requested user or movie ID")
+	}
+	return movie, nil
 }
 
 // VerifyCredentials calls GET /verify_credentials.

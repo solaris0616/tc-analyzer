@@ -133,7 +133,7 @@ func (c *Client) GetUser(ctx context.Context, userID string) (*UserInfo, error)
 func (c *Client) GetMovieInfo(ctx context.Context, movieID string) (*MovieSnapshot, error)
 
 // GetCurrentLive は GET /users/{user_id}/current_live を呼び出す
-// 配信中でない場合は (nil, nil) を返す（404 は正常系として扱う）
+// 404時はユーザー情報と最新配信を再確認し、配信中でない場合は (nil, nil) を返す
 func (c *Client) GetCurrentLive(ctx context.Context, userID string) (*MovieSnapshot, error)
 
 // GetComments は GET /movies/{movie_id}/comments を呼び出す
@@ -205,7 +205,10 @@ func checkResponse(resp *http.Response) error {
         return nil
     }
     defer resp.Body.Close()
-    body, _ := io.ReadAll(resp.Body)
+    body, err := io.ReadAll(resp.Body)
+    if err != nil {
+        return fmt.Errorf("failed to read API error response: %w", err)
+    }
 
     var errBody struct {
         Error struct {
@@ -227,27 +230,17 @@ func checkResponse(resp *http.Response) error {
 }
 ```
 
-### GetCurrentLive の 404 ハンドリング
+### GetCurrentLive の配信状態判定
 
-```go
-func (c *Client) GetCurrentLive(ctx context.Context, userID string) (*MovieSnapshot, error) {
-    resp, err := c.do(ctx, "GET", "/users/"+userID+"/current_live")
-    if err != nil {
-        return nil, err
-    }
-    defer resp.Body.Close()
+1. `GET /users/{user_id}/current_live`が200なら、配信情報を返す。
+2. 404ならレスポンスを閉じ、`GET /users/{user_id}`の`user.is_live`と`user.last_movie_id`を確認する。これらは内部レスポンス型で読み取り、公開`UserInfo`には含めない。
+3. ユーザーがオフラインなら`(nil, nil)`を返す。配信中なのにユーザーIDまたは最新配信IDが欠ける場合はエラーを返す。
+4. 配信中なら`GetMovieInfo`で最新配信を取得する。配信が404または終了済みなら、確認中の配信終了として`(nil, nil)`を返す。
+5. ライブ中の配信IDと配信者IDがユーザー情報と一致する場合だけ配信情報を返す。不一致またはID欠落はエラーを返す。
 
-    // 404 は「配信中でない」を意味する正常系
-    if resp.StatusCode == http.StatusNotFound {
-        return nil, nil
-    }
-    if err := checkResponse(resp); err != nil {
-        return nil, err
-    }
-    // JSON デコード → MovieSnapshot 生成
-    ...
-}
-```
+404以外のHTTPエラー、JSONデコードエラー、通信エラー、キャンセルは呼び出し元へ返す。ユーザー情報取得の404もエラーとして返す。追加リクエストにも同じ認証、タイムアウト、レート制限、コンテキストを適用する。
+
+`status`、`watch`の開始判定と配信開始待機は共通の`GetCurrentLive`を使用する。DBスキーマや保存形式は変更しない。
 
 ---
 
@@ -280,7 +273,7 @@ func (c *Client) GetCurrentLive(ctx context.Context, userID string) (*MovieSnaps
 
 ### GET /users/{user_id}/current_live
 
-同じ構造。配信中でない場合は HTTP 404 が返る。
+同じ構造。HTTP 404の場合はユーザー情報と最新配信で状態を再確認する。
 
 ### GET /movies/{movie_id}/comments
 
